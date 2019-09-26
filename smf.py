@@ -15,6 +15,14 @@ import subprocess as sp
 from datetime import datetime
 
 
+"""smf.py: file undupe by sizematching files in folders"""
+__version__   = "0.3"
+__author__    = "ed <smf@ocv.me>"
+__credits__   = ["stackoverflow.com"]
+__license__   = "MIT"
+__copyright__ = 2019
+
+
 FS_ENCODING = sys.getfilesystemencoding()
 
 ENC_FILTER = 'surrogateescape'
