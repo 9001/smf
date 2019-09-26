@@ -91,7 +91,7 @@ elif sys.platform in ['win32','cygwin']:
 			
 		(bufx, bufy, curx, cury, wattr,
 		 left, top, right, bottom, maxx, maxy) = \
-			struct.unpack('hhhhHhhhhh', csbi.raw)
+			struct.unpack('hhhhHhhhhhh', csbi.raw)
 		
 		return [right - left + 1, bottom - top + 1]
 	
