@@ -1,19 +1,33 @@
 #!/usr/bin/env python3
 # coding: utf-8
-from __future__ import print_function
+from __future__ import print_function, unicode_literals
 
+import re
 import os
 import sys
 import stat
 import time
 import gzip
+import struct
+import tempfile
 import threading
 import subprocess as sp
 from datetime import datetime
 
 
+FS_ENCODING = sys.getfilesystemencoding()
+
+ENC_FILTER = 'surrogateescape'
+if sys.version_info[0] == 2:
+	# drop mojibake support for py2 (bytestrings everywhere is a pain)
+	ENC_FILTER = 'replace'
+
+
 if sys.platform.startswith('linux') \
-or sys.platform == 'darwin':
+or sys.platform in ['darwin', 'cygwin']:
+	VT100 = True
+	TERM_ENCODING = sys.stdout.encoding
+
 	import tty, termios
 	def getch():
 		ch = 0
@@ -30,7 +44,7 @@ or sys.platform == 'darwin':
 			termios.tcsetattr(fd, termios.TCSADRAIN, old_cfg)
 		return ch
 
-	import fcntl, termios, struct, os
+	import fcntl, termios, os
 	def termsize():
 		env = os.environ
 		def ioctl_GWINSZ(fd):
@@ -61,21 +75,22 @@ or sys.platform == 'darwin':
 		return int(cr[1]), int(cr[0])
 
 
-elif sys.platform in ['win32','cygwin']:
-	raise Exception('untested, remove me if this actually works')
-	
-	import vcrt
+elif sys.platform == 'win32':
+	VT100 = False
+	TERM_ENCODING = 'cp65001'
+
+	if sys.version_info[0] == 2:
+		TERM_ENCODING = 'cp1252'  # cp932 if weeb
+		FS_ENCODING = 'mbcs'  # close enough?
+
+	import msvcrt
 	def getch():
 		while msvcrt.kbhit():
 			msvcrt.getch()
 		
-		ch = msvcrt.getch()
-		if sys.version_info[0] > 2:
-			return ch
-		else:
-			return ch.decode(encoding='mbcs')
+		return msvcrt.getch().decode(TERM_ENCODING, 'replace')
 
-	from ctypes import windll, create_string_buffer, struct
+	from ctypes import windll, create_string_buffer
 	def termsize_native():
 		ret = None
 		try:
@@ -96,16 +111,72 @@ elif sys.platform in ['win32','cygwin']:
 		return [right - left + 1, bottom - top + 1]
 	
 	def termsize_ncurses():
-		p = sp.Popen(['tput','cols'], stdin=sp.PIPE, stdout=sp.PIPE)
-		cols = int(p.communicate(input=None)[0])
-		
-		p = sp.Popen(['tput','lines'], stdin=sp.PIPE, stdout=sp.PIPE)
-		lines = int(p.communicate(input=None)[0])
-		
-		return [cols, lines]
+		try:
+			return [
+				int(sp.check_output(['tput', 'cols'])),
+				int(sp.check_output(['tput', 'lines'])),
+			]
+		except:
+			return None
 	
 	def termsize():
-		return termsize_native() or termsize_ncurses()
+		ret = termsize_native() or termsize_ncurses()
+		if ret:
+			return ret
+		
+		raise Exception('powershell is not supported; use cmd on win10 or use cygwin\n'*5)
+
+	from ctypes import Structure, c_short, c_char_p
+	class COORD(Structure):
+		pass
+
+	COORD._fields_ = [("X", c_short), ("Y", c_short)]
+
+	re_pos = re.compile('\033\\[([0-9]+)?(;[0-9]+)?H')
+	re_ansi = re.compile('\033\\[[^a-zA-Z\033]*[a-zA-Z]')
+	re_color = re.compile('\033\\[[0-9;]*m')
+	re_other_ansi = re.compile('\033\\[[^a-zA-Z\033]*[a-lnzA-GI-Z]')
+
+	wcp = TERM_ENCODING
+	if wcp.startswith('cp'):
+		wcp = wcp[2:]
+
+	v = sp.check_output('chcp', shell=True).decode('utf-8')
+	if ' {}'.format(wcp) not in v:
+		_ = os.system('chcp ' + wcp)  # fix moonrunes
+		msg = '\n\n\n\n  your  codepage  was  wrong\n\n  dont worry, i just fixed it\n\n    please  run  me  again\n\n\n\n             -- smf, 2019\n\n\n'
+		try:
+			sys.stdout.buffer.write(msg.encode('ascii'))
+		except:
+			sys.stdout.write(msg.encode('ascii'))
+
+		exit()
+
+	print('fsys:', FS_ENCODING)
+	print('term:', TERM_ENCODING)
+
+	def wprint(txt):
+		_ = os.system('cls')  # somehow enables the vt100 interpreter??
+		#txt = re_other_ansi.sub('', txt)
+		
+		h = windll.kernel32.GetStdHandle(-11)
+		ptr = 0
+		for m in re_pos.finditer(txt):
+			#print(txt[ptr:m.start()], end='')
+			c = txt[ptr:m.start()].encode(TERM_ENCODING, 'replace')
+			windll.kernel32.WriteConsoleA(h, c_char_p(c), len(c), None, None)
+			ptr = m.end()
+			y, x = m.groups()
+			y = int(y) if y else 1
+			x = int(x[1:]) if x else 1
+			windll.kernel32.SetConsoleCursorPosition(h, COORD(x-1, y-1))
+
+		#print(txt[ptr:], end='')
+		#windll.kernel32.SetConsoleCursorPosition(h, COORD(0, 0))
+		#print()
+		#sys.stdout.flush()
+		c = txt[ptr:].encode(TERM_ENCODING, 'replace')
+		windll.kernel32.WriteConsoleA(h, c_char_p(c), len(c), None, None)
 
 else:
 	raise Exception('unsupported platform: {}'.format(sys.platform))
@@ -113,6 +184,14 @@ else:
 
 ########################################################################
 ########################################################################
+
+
+def fsenc(path):
+	return path.encode(FS_ENCODING, ENC_FILTER)
+
+
+def fsdec(path):
+	return path.decode(FS_ENCODING, ENC_FILTER)
 
 
 class Folder(object):
@@ -140,7 +219,7 @@ class DiskWalker(object):
 		
 		self.walk(top)
 		self.cur_top = None
-	
+
 	def logger(self):
 		last_top = None
 		while True:
@@ -157,9 +236,10 @@ class DiskWalker(object):
 	def walk(self, top):
 		self.cur_top = top
 		folder = Folder(top)
-		for fn in sorted(os.listdir(top)):
-			path = os.path.join(top, fn)
-			try: sr = os.lstat(path)
+		btop = fsenc(top)
+		for bfn in sorted(os.listdir(btop)):
+			bpath = os.path.join(btop, bfn)
+			try: sr = os.lstat(bpath)
 			except: continue
 			mode = sr.st_mode
 			
@@ -168,11 +248,11 @@ class DiskWalker(object):
 			
 			elif stat.S_ISDIR(mode):
 				try:
-					self.walk(path)
+					self.walk(fsdec(bpath))
 				except KeyboardInterrupt:
 					raise
 				except:
-					pass
+					continue
 
 			elif stat.S_ISREG(mode) and sr.st_size > 0:
 				folder.files.append(sr.st_size)
@@ -184,11 +264,13 @@ class DiskWalker(object):
 
 
 def gen_dupe_map():
+	t0 = time.time()
 	dw = DiskWalker('.')
 	folders = dw.folders
 	print("\ngenerating dupemap (hope you're using pypy w)")
 
 	# compare each unique permutation of [Folder,Folder]
+	t1 = time.time()
 	nth = 0
 	dupes = []
 	remains = len(folders)
@@ -230,7 +312,8 @@ def gen_dupe_map():
 			
 			dupes.append([score, folder1, folder2])
 
-	return dupes
+	t2 = time.time()
+	return dupes, [t1-t0, t2-t1]
 
 
 def save_dupe_map(cache_path, dupes):
@@ -242,10 +325,10 @@ def save_dupe_map(cache_path, dupes):
 		for _, fld1, fld2 in dupes:
 			for fld in [fld1, fld2]:
 				if fld not in seen_folders:
-					txt = u'p {}\nf {}\n'.format(fld.path,
+					txt = 'p {}\nf {}\n'.format(fld.path,
 						' '.join(str(x) for x in fld.files))
 					
-					f.write(txt.encode('utf-8'))
+					f.write(txt.encode('utf-8', ENC_FILTER))
 					seen_folders[fld] = n
 					n += 1
 		
@@ -264,10 +347,10 @@ def load_dupe_map(cache_path):
 	dupes = []
 	with gzip.open(cache_path, 'rb') as f:
 		while True:
-			ln = f.readline().decode('utf-8').rstrip()
-			if ln.startswith(u'p '):
-				ln2 = f.readline().decode('utf-8').rstrip()
-				if not ln2.startswith(u'f '):
+			ln = f.readline()[:-1].decode('utf-8', ENC_FILTER)
+			if ln.startswith('p '):
+				ln2 = f.readline()[:-1].decode('utf-8')
+				if not ln2.startswith('f '):
 					raise Exception('non-f after p')
 				
 				folder = Folder(ln[2:])
@@ -277,12 +360,12 @@ def load_dupe_map(cache_path):
 				folders.append(folder)
 				continue
 			
-			if ln.startswith(u'd '):
+			if ln.startswith('d '):
 				score, i1, i2 = [int(x) for x in ln[2:].split(' ')]
 				dupes.append([score/1000., folders[i1], folders[i2]])
 				continue
 			
-			if ln == u'eof':
+			if ln == 'eof':
 				break
 			
 			raise Exception('unexpected line: {}'.format(ln))
@@ -299,7 +382,7 @@ def dump_summary(dupes):
 		rn = rhs.path
 		if last_lhs != ln:
 			last_lhs = ln
-			print(u'\n\033[1;37m{:5}{}\033[0m'.format('', ln))
+			print('\n\033[1;37m{:5}{}\033[0m'.format('', ln))
 		
 		if score < 0.2:
 			c = '1;30'
@@ -314,17 +397,19 @@ def dump_summary(dupes):
 		else:
 			c = '1;37;44;48;5;28'
 		
-		print(u'\033[{}m{:3d}%\033[0m {}'.format(
+		print('\033[{}m{:3d}%\033[0m {}'.format(
 			c, int(score*100), rn))
 
 
 def read_folder(top):
-	# TODO have walker use this maybe
 	ret = []
-	for fn in sorted(os.listdir(top)):
-		path = os.path.join(top, fn)
-		sr = os.lstat(path)
+	btop = fsenc(top)
+	#top = fsenc(unitop)
+	for bfn in sorted(os.listdir(btop)):
+		bpath = os.path.join(btop, bfn)
+		sr = os.lstat(bpath)
 		mode = sr.st_mode
+		fn = fsdec(bfn)
 		
 		if stat.S_ISREG(mode):
 			ret.append([sr.st_size, sr.st_mtime, fn])
@@ -352,8 +437,12 @@ def draw_panel(panel_w, statlist, other_sizes):
 				other_sizes.remove(sz)
 				c = '1;30;47'
 			
+			sz = str(sz).rjust(11)
+			sz = '{}\033[36m{}\033[0m{}'.format(
+				sz[:-6], sz[-6:-3], sz[-3:])
+
 			ts = datetime.utcfromtimestamp(ts).strftime('%Y-%m%d')
-			meta = u'{} {:11}'.format(ts, sz)
+			meta = '{} {}'.format(ts, sz)
 		
 		elif sz == -2:
 			# symlink
@@ -367,13 +456,13 @@ def draw_panel(panel_w, statlist, other_sizes):
 			# unhandled
 			c = '1;31'
 		
-		ret.append(u'{} \033[{}m{}'.format(
+		ret.append('{} \033[{}m{}'.format(
 			meta, c, fn[:fn_len].ljust(fn_len)))
 
 	return ret
 
 
-def gui(dupes):
+def gui(dupes, gen_time):
 	ch = None
 	idupe = 0
 	while True:
@@ -395,11 +484,20 @@ def gui(dupes):
 		if ch == 'e':
 			# very safe assumption that urxvt and host has the same font size
 			# and that host-terminal is running fullscreen but urxvt won't be
-			geom = '{}x{}'.format(scr_w, scr_h - 1)
+			geom = '{}x{}'.format(scr_w, scr_h - 1).encode('ascii')
 			
-			sp.Popen([
-				'urxvt', '-title', 'ranger', '+sb', '-bl', '-geometry', geom, '-e',
-				'ranger', fld1.path, fld2.path ])
+			if VT100:
+				try:
+					sp.Popen([
+						b'urxvt', b'-title', b'ranger', b'+sb', b'-bl', b'-geometry', geom, b'-e',
+						b'ranger', fsenc(fld1.path), fsenc(fld2.path) ])
+				except:
+					print('could not run urxvt and/or ranger')
+					time.sleep(1)
+			else:
+				sp.Popen(['explorer.exe', fld1.path])
+				time.sleep(0.5)  # orz
+				sp.Popen(['explorer.exe', fld2.path])
 			
 			# we could poke urxvt into maximized after startup
 			# but that looks bad and why is this even necessary idgi
@@ -425,22 +523,30 @@ def gui(dupes):
 			score_color = '1;37;44;48;5;28'
 		
 		# start with just the header
-		scrn = u'\033[H\033[0;1;40m{idupe} / {ndupes}  \033[{sc_c}m{sc_v}%\033[0;1;40m\n\033[0m'.format(
-			idupe = idupe,
+		scrn = '\033[H\033[0;1;40m{idupe} / {ndupes}  \033[{sc_c}m{sc_v}%\033[0;36;40m  {gt1:.2f}s + {gt2:.2f}s\n\033[0m'.format(
+			idupe = idupe + 1,
 			ndupes = len(dupes),
 			sc_c = score_color,
-			sc_v = int(score*100)
+			sc_v = int(score*100),
+			gt1 = gen_time[0],
+			gt2 = gen_time[1]
 		)
 		
 		# adding the two folder paths,
 		# start by finding the longest parent-path and folder name,
 		# if these fit within scr_w we can align the paths on the last /
+		sep = '{}'.format(os.path.sep)
 		max_parent = 0
 		max_leaf = 0
 		paths = [fld1.path, fld2.path]
 		parts = []
 		for path in paths:
-			a, b = path.rsplit('/', 1)
+			try:
+				a, b = path.rsplit(sep, 1)
+			except:
+				a = ''
+				b = path
+			
 			max_parent = max(max_parent, len(a))
 			max_leaf = max(max_leaf, len(b)+1)
 		
@@ -452,29 +558,34 @@ def gui(dupes):
 		
 		for path in paths:
 			spent = center_pad
-			scrn += u' ' * center_pad
+			scrn += ' ' * center_pad
 			
-			a, b = path.rsplit('/', 1)
-			b = '/' + b
+			try:
+				a, b = path.rsplit(sep, 1)
+			except:
+				a = ''
+				b = path
+
+			b = sep + b
 			ln = max_parent - len(a)
-			scrn += u' ' * ln
+			scrn += ' ' * ln
 			spent += ln
 			
-			scrn += u'\033[0;36m' + a
+			scrn += '\033[0;36m' + a
 			spent += len(a)
 			
 			b = b[:scr_w-spent]
-			scrn += u'\033[1;37m' + b + '\033[0m'
+			scrn += '\033[1;37m' + b + '\033[0m'
 			spent += len(b)
 			
-			scrn += u' ' * (scr_w - spent)
+			scrn += ' ' * (scr_w - spent)
 		
 		# the left and right panels listing the two folders
 		def asdf(fld):
 			try:
 				statlist = read_folder(fld.path)
 			except:
-				statlist = [[-3, -3, 'could not read folder']]
+				statlist = [[-3, -3, 'folder 404 (press U to rescan)']]
 			
 			sizes = [x[0] for x in statlist]
 			return statlist, sizes
@@ -493,35 +604,57 @@ def gui(dupes):
 				if pan:
 					v.append(pan.pop(0))
 				else:
-					v.append(u' ' * panel_w)
+					v.append(' ' * panel_w)
 			
 			file_rows.append(
-				#u'{}\033[1;34m|\033[0m{}\033[0m'.format(*v))
-				u'\033[{y}H\033[0m\033[K{f1}\033[{y};{x}H\033[0;1;34m|\033[0m{f2}\033[0m'.format(
+				#'{}\033[1;34m|\033[0m{}\033[0m'.format(*v))
+				'\033[{y}H\033[0m\033[K{f1}\033[{y};{x}H\033[0;1;34m|\033[0m{f2}\033[0m'.format(
 					y=y, x=panel_w+1, f1=v[0], f2=v[1]))
 		
 		scrn += '\n'.join(file_rows)
-		print(scrn.replace('\n', '\033[K\n') + '\033[J', end='')
+		scrn = scrn.replace('\n', '\033[K\n') + '\033[J'
+		
+		if VT100:
+			print(scrn, end='')
+		else:
+			wprint(scrn)
+		
 		ch = getch()
-		# TODO must handle ^C and \033 on windows
+		if ch in ['\003', '\033']:
+			return 'x'
+		
+		if ch == 'u':
+			return ch
 
 
 def main():
-	cache_path = '/dev/shm/smf.cache'
-	if os.path.isfile(cache_path):
-		print('loading cache')
-		dupes = load_dupe_map(cache_path)
-	else:
-		dupes = gen_dupe_map()
-		print('saving cache')
-		save_dupe_map(cache_path, dupes)
-	
-	if not dupes:
-		print('no dupes ;_;')
-		return
-	
-	#dump_summary()
-	gui(dupes)
+	cache_path = os.path.join(tempfile.gettempdir(), 'smf.cache')
+	print('using', cache_path)
+
+	while True:
+		if os.path.isfile(cache_path):
+			print('loading cache')
+			dupes = load_dupe_map(cache_path)
+			gen_time = [0., 0.]
+		else:
+			dupes, gen_time = gen_dupe_map()
+			print('saving cache')
+			save_dupe_map(cache_path, dupes)
+		
+		if not dupes:
+			print('no dupes ;_;')
+			os.remove(cache_path)
+			return
+		
+		#return
+		#dump_summary()
+		rv = gui(dupes, gen_time)
+		
+		if rv == 'x':
+			return
+		
+		if rv == 'u':
+			os.remove(cache_path)
 
 
 def prof_collect():
@@ -537,6 +670,7 @@ def prof_display():
 
 
 if __name__ == '__main__':
+	#print('[{}]'.format(repr(getch())))
 	main()
 	#prof_collect()
 	#prof_display()

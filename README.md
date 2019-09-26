@@ -13,6 +13,8 @@ it sounds too naive to work but it actually does, really well even, so don't kno
 run the script, preferably with pypy which reduces the initial scan from 40sec to 2.6sec (seriously), then
 * use W/S to navigate through the folders it thinks are dupes
 * press E to open an actual file explorer at those two folders
+* press U to toss the cache
+* press Q to toggle view *(not yet, that's a spoiler)*
 * duplicate files are hilighted in white
 * folders are blue
 * symlinks are yellow
@@ -27,7 +29,10 @@ the following filters are applied to remove most false positives:
 
 it deals moderately well with moonrunes, using absolute cursor positioning to avoid having to consider glyph widths (nice)
 
-also you might think that this is windows compatible due to all the msvcrt/mbcs/`hhhhHhhhhh` stuff, but don't be fooled:
-* notice the system() call to urxvt which, while not crucial, is an unfortunate feature to lose
-* any pre-win10do console would definitely break on `\033[{y}H\033[0m\033[K{f1}\033[{y};{x}H\033[0;1;34m|\033[0m{f2}\033[0m`
-* i don't have a windows machine to test this on really
+also you might think that this is windows compatible due to all the msvcrt/mbcs/`hhhhHhhhhh` stuff, and that is absolutely correct:
+* use python3 (unless you only have ascii filenames)
+* use the regular new win10 terminal, powershell is a meme
+* optionally change font to `MS Gothic` to further enable moonrunes
+* the ranger hotkey was substituted with two explorer windows, please change this if you have a better idea
+
+![screenshot](win10do.png)
