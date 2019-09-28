@@ -237,9 +237,11 @@ class DiskWalker(object):
 		thr.daemon = True
 		thr.start()
 		
+		print('\n\033[32mentering\033[0m', top)
 		self.dev_id = os.lstat(top).st_dev
 		self.walk(top)
 		self.cur_top = None
+		print('\033[32mleaving\033[0m', top)
 
 	def logger(self):
 		last_top = None
@@ -292,12 +294,15 @@ class DiskWalker(object):
 			self.folders.append(folder)
 
 
-def gen_dupe_map():
+def gen_dupe_map(roots):
 	print("\nscanning disk...")
 	
 	t0 = time.time()
-	dw = DiskWalker('.')
-	folders = dw.folders
+	folders = []
+	for root in roots:
+		dw = DiskWalker(root)
+		folders.extend(dw.folders)
+	
 	print("\ngenerating dupemap (hope you're using pypy w)")
 
 	# compare each unique permutation of [Folder,Folder]
@@ -689,6 +694,11 @@ def gui(dupes, gen_time):
 
 
 def main():
+	if len(sys.argv) < 2:
+		print('give me folders to scan as arguments')
+		print('for example "." for current folder')
+		sys.exit(1)
+	
 	cache_path = os.path.join(tempfile.gettempdir(), 'smf.cache')
 	print('using', cache_path)
 
@@ -698,12 +708,12 @@ def main():
 			dupes = load_dupe_map(cache_path)
 			gen_time = [0., 0.]
 		else:
-			dupes, gen_time = gen_dupe_map()
+			dupes, gen_time = gen_dupe_map(sys.argv[1:])
 			print('saving cache')
 			save_dupe_map(cache_path, dupes)
 		
 		if not dupes:
-			print('no dupes ;_;')
+			print('you have no dupes ;_;')
 			os.remove(cache_path)
 			return
 		
