@@ -225,6 +225,7 @@ class DiskWalker(object):
 		thr.daemon = True
 		thr.start()
 		
+		self.dev_id = os.lstat(top).st_dev
 		self.walk(top)
 		self.cur_top = None
 
@@ -239,20 +240,28 @@ class DiskWalker(object):
 				continue
 			
 			last_top = self.cur_top
-			print('reading', self.cur_top)
+			print('\033[36mreading\033[0m', self.cur_top)
 	
 	def walk(self, top):
 		self.cur_top = top
+		dev_id = self.dev_id
 		folder = Folder(top)
 		btop = fsenc(top)
 		for bfn in sorted(os.listdir(btop)):
 			bpath = os.path.join(btop, bfn)
-			try: sr = os.lstat(bpath)
-			except: continue
+			try:
+				sr = os.lstat(bpath)
+			except:
+				print('\033[1;31maccess denied:\033[0m', fsdec(bpath))
+				continue
+			
 			mode = sr.st_mode
 			
 			if stat.S_ISLNK(mode):
 				continue
+			
+			elif sr.st_dev != dev_id:
+				print('\033[35mskipping mountpoint:\033[0m', fsdec(bpath))
 			
 			elif stat.S_ISDIR(mode):
 				try:
@@ -260,7 +269,7 @@ class DiskWalker(object):
 				except KeyboardInterrupt:
 					raise
 				except:
-					continue
+					print('\033[1;31maccess denied:\033[0m', fsdec(bpath))
 
 			elif stat.S_ISREG(mode) and sr.st_size > 0:
 				folder.files.append(sr.st_size)
