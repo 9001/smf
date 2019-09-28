@@ -10,6 +10,7 @@ import time
 import gzip
 import struct
 import tempfile
+import platform
 import threading
 import subprocess as sp
 from datetime import datetime
@@ -86,17 +87,25 @@ or sys.platform in ['darwin', 'cygwin']:
 elif sys.platform == 'win32':
 	VT100 = False
 	TERM_ENCODING = 'cp65001'
+	PYPY = platform.python_implementation() == 'PyPy'
 
 	if sys.version_info[0] == 2:
 		TERM_ENCODING = 'cp1252'  # cp932 if weeb
 		FS_ENCODING = 'mbcs'  # close enough?
+	elif PYPY:
+		TERM_ENCODING = 'utf-8'  # pypy bug: 65001 not impl
+		FS_ENCODING = 'utf-8'  # pypy bug: thinks we are mbcs
 
 	import msvcrt
 	def getch():
 		while msvcrt.kbhit():
 			msvcrt.getch()
 		
-		return msvcrt.getch().decode(TERM_ENCODING, 'replace')
+		rv = msvcrt.getch()
+		try:
+			return rv.decode(TERM_ENCODING, 'replace')
+		except:
+			return rv  # pypy bug: getch is str()
 
 	from ctypes import windll, create_string_buffer
 	def termsize_native():
@@ -150,7 +159,7 @@ elif sys.platform == 'win32':
 		wcp = wcp[2:]
 
 	v = sp.check_output('chcp', shell=True).decode('utf-8')
-	if ' {}'.format(wcp) not in v:
+	if ' {}'.format(wcp) not in v and not PYPY:
 		_ = os.system('chcp ' + wcp)  # fix moonrunes
 		msg = '\n\n\n\n  your  codepage  was  wrong\n\n  dont worry, i just fixed it\n\n    please  run  me  again\n\n\n\n             -- smf, 2019\n\n\n'
 		try:
@@ -160,11 +169,13 @@ elif sys.platform == 'win32':
 
 		exit()
 
+	_ = os.system('cls')  # somehow enables the vt100 interpreter??
+	
 	print('fsys:', FS_ENCODING)
 	print('term:', TERM_ENCODING)
 
 	def wprint(txt):
-		_ = os.system('cls')  # somehow enables the vt100 interpreter??
+		_ = os.system('cls')  # ensure vt100 is still good
 		#txt = re_other_ansi.sub('', txt)
 		
 		h = windll.kernel32.GetStdHandle(-11)
@@ -281,6 +292,8 @@ class DiskWalker(object):
 
 
 def gen_dupe_map():
+	print("\nscanning disk...")
+	
 	t0 = time.time()
 	dw = DiskWalker('.')
 	folders = dw.folders
@@ -637,7 +650,7 @@ def gui(dupes, gen_time):
 			wprint(scrn)
 		
 		ch = getch()
-		if ch in ['\003', '\033']:
+		if ch in ['\003']:
 			return 'x'
 		
 		if ch == 'u':
