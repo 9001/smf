@@ -498,6 +498,13 @@ def draw_panel(panel_w, statlist, other_sizes):
 	return ret
 
 
+def termsafe(txt):
+	try:
+		return txt.encode(TERM_ENCODING, 'backslashreplace').decode(TERM_ENCODING)
+	except:
+		return txt.encode(TERM_ENCODING, 'replace').decode(TERM_ENCODING)
+
+
 def gui(dupes, gen_time):
 	ch = None
 	idupe = 0
@@ -578,7 +585,6 @@ def gui(dupes, gen_time):
 		max_parent = 0
 		max_leaf = 0
 		paths = [fld1.path, fld2.path]
-		parts = []
 		for path in paths:
 			try:
 				a, b = path.rsplit(sep, 1)
@@ -600,10 +606,10 @@ def gui(dupes, gen_time):
 			scrn += ' ' * center_pad
 			
 			try:
-				a, b = path.rsplit(sep, 1)
+				a, b = termsafe(path).rsplit(sep, 1)
 			except:
 				a = ''
-				b = path
+				b = termsafe(path)
 
 			b = sep + b
 			ln = max_parent - len(a)
@@ -675,7 +681,11 @@ def gui(dupes, gen_time):
 			file_rows.append(
 				#'{}\033[1;34m|\033[0m{}\033[0m'.format(*v))
 				'\033[{y}H\033[0m\033[K{f1}\033[{y};{x}H{scrollbar}\033[0m{f2}\033[0m'.format(
-					y=y, x=panel_w+1, f1=v[0], f2=v[1], scrollbar=scrollbar.pop(0)))
+					y=y,
+					x=panel_w+1,
+					f1=termsafe(v[0]),
+					f2=termsafe(v[1]),
+					scrollbar=scrollbar.pop(0)))
 		
 		scrn += '\n'.join(file_rows)
 		scrn = scrn.replace('\n', '\033[K\n') + '\033[J'
