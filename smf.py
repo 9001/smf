@@ -409,6 +409,28 @@ def load_dupe_map(cache_path):
 	return dupes
 
 
+def colorize_score(score):
+	if score == "xxx":
+		return '0;37', score
+	
+	if score < 0.2:
+		c = '1;30'
+	elif score < 0.35:
+		c = '0;31'
+	elif score < 0.5:
+		c = '0;36'
+	elif score < 0.7:
+		c = '0;33'
+	elif score < 0.9:
+		c = '1;32'
+	elif score <= 1:
+		c = '1;37;44;48;5;28'
+	else:
+		c = '1;37;41'
+	
+	return c, int(score*100)
+
+
 def dump_summary(dupes):
 	# keep track of the 1st folder in the pair,
 	# print it as a header for all the folders it matched against
@@ -420,21 +442,8 @@ def dump_summary(dupes):
 			last_lhs = ln
 			print('\n\033[1;37m{:5}{}\033[0m'.format('', ln))
 		
-		if score < 0.2:
-			c = '1;30'
-		elif score < 0.35:
-			c = '0;31'
-		elif score < 0.5:
-			c = '0;36'
-		elif score < 0.7:
-			c = '0;33'
-		elif score < 0.9:
-			c = '1;32'
-		else:
-			c = '1;37;44;48;5;28'
-		
-		print('\033[{}m{:3d}%\033[0m {}'.format(
-			c, int(score*100), rn))
+		cs, s = colorize_score(score)
+		print('\033[{}m{:3d}%\033[0m {}'.format(cs, s, rn))
 
 
 def read_folder(top):
@@ -505,236 +514,441 @@ def termsafe(txt):
 		return txt.encode(TERM_ENCODING, 'replace').decode(TERM_ENCODING)
 
 
-def gui(dupes, gen_time):
-	ch = None
-	idupe = 0
-	scr_y = 0
-	while True:
-		scr_w, scr_h = termsize()
-		panel_w = int(((scr_w + 1) / 2) - 1)
+class FSDir(object):
+	def __init__(self, path):
+		self.path = path
+		self.dirs = {}
+		self.files = []
+		self.smin = 9
+		self.smax = -9
+		self.scur = -9
+
+	def build_until(self, dest, extra_levels=1):
+		if extra_levels < 0 or (
+			not dest.startswith(self.path) \
+			and not self.path.startswith(dest)
+		):
+			raise Exception('\n[{}]  # self\n[{}]  # dest\n[{}]'.format(
+				self.path, dest, extra_levels))
 		
-		if ch == 'a':
-			scr_y = 0
-			idupe -= 1
-			if idupe < 0:
-				idupe = len(dupes)-1
+		if self.path.startswith(dest):
+			extra_levels -= 1
 		
-		if ch == 'd':
-			scr_y = 0
-			idupe += 1
-			if idupe >= len(dupes):
-				idupe = 0
+		if self.files or self.dirs:
+			if extra_levels > 0:
+				dn = dest[len(self.path):].split('/', 1)[0]
+				self.dirs[dn].build_until(dest, extra_levels)
+			
+			return
 		
-		score, fld1, fld2 = dupes[idupe]
+		bself = fsenc(self.path)
+		for bfn in sorted(os.listdir(bself)):
+			fn = fsdec(bfn)
+			bpath = os.path.join(bself, bfn)
+			path = os.path.join(self.path, fn)
+			
+			sr = os.lstat(bpath)
+			mode = sr.st_mode
+
+			if stat.S_ISREG(mode):
+				self.files.append([sr.st_size, sr.st_mtime, fn])
+			elif stat.S_ISLNK(mode):
+				self.files.append([-2, -2, fn])
+			elif stat.S_ISDIR(mode):
+				path += '/'
+				subdir = FSDir(path)
+				self.dirs[fn] = subdir
+
+				if dest.startswith(path) \
+				or (path.startswith(dest) and extra_levels > 0):
+					subdir.build_until(dest, extra_levels)
+	
+	def format(self, lv=0):
+		scores = ''.join(['\033[{}m{:>3}%\033[0m '.format(x, y) for x, y in [
+			colorize_score("xxx" if self.smin > 7 else self.smin),
+			colorize_score("xxx" if self.smax < -7 else self.smax),
+			colorize_score("xxx" if self.scur < -7 else self.scur)]])
+
+		if self.smin == 1: cdir = '7;48;5;28;1' # purely dupes; green
+		elif self.smax < -7: cdir = 1  # purely unique; red
+		elif self.smin > 7: cdir = 5  # contains unique folders; purple
+		elif self.smin > 0: cdir = 3  # purely folders with dupes; yellow
+		else: cdir = 6  # wait what did i forget
 		
-		if ch == 'e':
-			# very safe assumption that urxvt and host has the same font size
-			# and that host-terminal is running fullscreen but urxvt won't be
-			geom = '{}x{}'.format(scr_w, scr_h - 1).encode('ascii')
+		ret = '{scores} {pad}\033[0;3{cdir}m{path}\033[0m\n'.format(
+			scores = scores,
+			pad = '{}\033[1;3{}m|'.format(' ' * (lv * 2 - 1), lv%8) if lv else '',
+			cdir = cdir,
+			path = self.path)
+		
+		for _, p in sorted(self.dirs.items()):
+			ret += p.format(lv + 1)
+		
+		if self.dirs and not ret.endswith('\n\n'):
+			ret += '\n'
+		
+		return ret
+
+	def dump_tree(self, lv=0):
+		pad = '{}\033[1;3{}m|'.format(' ' * (lv * 2 - 1), lv%8) if lv else ''
+		ret = '{}\033[0;36m{}\033[0m\n'.format(pad, self.path)
+		
+		for _, p in sorted(self.dirs.items()):
+			ret += p.dump(lv + 1)
+		
+		for p in self.files:
+			ret += '{}\033[0m{}\n'.format(pad, p[2])
+		
+		return ret
+
+
+class TUI(object):
+	def __init__(self, cur_path):
+		self.gen_time = [0,0]
+		self.cur_path = cur_path
+		self.fs = None
+
+	def set_dupes(self, dupes):
+		self.dupes = dupes
+		self.fs = None
+
+	def tree(self):
+		if not self.fs:
+			print('\033[36mbuilding directory tree...\033[0m')
+			self.fs = FSDir('/')
+			for score, fld1, fld2 in self.dupes:
+				for path in [fld1.path, fld2.path]:
+					pathnodes = path.lstrip('/').split('/')
+					fsnode = self.fs
+					for pathnode in pathnodes:
+						try:
+							fsnode = fsnode.dirs[pathnode]
+							if not fsnode.dirs and not fsnode.files:
+								self.fs.build_until(path + '/')
+						except:
+							self.fs.build_until(path + '/')
+							fsnode = fsnode.dirs[pathnode]
+						
+						fsnode.smin = min(fsnode.smin, score)
+						fsnode.smax = max(fsnode.smax, score)
+					
+					fsnode.scur = max(fsnode.scur, score)
+			
+			# propagate unique folders up by resetting minimum score
+			def foo1(node):
+				have_unique = False
+				for _, f in node.dirs.items():
+					if foo1(f):
+						have_unique = True
+				
+				if node.scur < 0:
+					have_unique = True
+				
+				if have_unique:
+					node.smin = 9
+					return True
+
+			foo1(self.fs)
+
+			# noise filter: remove folders with no dupes at all
+			def foo2(node, parent_has_dupes=False):
+				drop = []
+				for k, v in node.dirs.items():
+					if v.smax < -7:
+						drop.append(k)
+				
+				# leave one leaf to indicate unique data within
+				i_have_dupes = node.scur > -7 or node.smax > -7
+				if parent_has_dupes or i_have_dupes:
+					drop = drop[1:]
+				
+				for k in drop:
+					del node.dirs[k]
+			
+				for _, v in node.dirs.items():
+					foo2(v, i_have_dupes)
+			
+			foo2(self.fs)
+		
+		tree = self.fs.format()
+
+		# TODO gui
+		header = '\033[0;1;40mmin% max% dir%\033[0m'
+		print('\n' + header)
+		print(termsafe(tree))
+		#for ln in termsafe(tree).split('\n'):
+		#	if '/m3-' in ln:
+		#		print(ln)
+		print(header)
+		print("""
+first column is xxx if there exists purely-unique folders below this point,
+first column is numeric with the smallest dupe score below this point otherwise
+
+second column is the highest dupe score below this point
+
+third column is xxx if there is no files in this folder,
+third column is numeric if there is duplicate files in this folder
+
+ \033[47;48;5;28;1mgreen folders\033[0m are 100% dupes and safe to delete
+\033[33myellow folders\033[0m contain some dupes and so does all subfolders
+\033[35mpurple folders\033[0m have subfolders which are not dupes
+   \033[31mred folders\033[0m contain only unique data
+  \033[36mblue folders\033[0m should not appear, let me know if you see one
+
+use shift-pgup/pgdn to scroll, Q to return, ^C to exit
+""")
+
+		ch = None
+		scr_y = 0
+		while True:
+			scr_w, scr_h = termsize()
+			
+			ch = getch()
+			if ch in ['\003']:
+				return 'x'
+			
+			if ch in ['u', 'q']:
+				return ch
+
+
+	def foldercomp(self):
+		ch = None
+		idupe = 0
+		scr_y = 0
+		while True:
+			scr_w, scr_h = termsize()
+			panel_w = int(((scr_w + 1) / 2) - 1)
+			
+			if ch == 'a':
+				scr_y = 0
+				idupe -= 1
+				if idupe < 0:
+					idupe = len(self.dupes)-1
+			
+			if ch == 'd':
+				scr_y = 0
+				idupe += 1
+				if idupe >= len(self.dupes):
+					idupe = 0
+			
+			score, fld1, fld2 = self.dupes[idupe]
+			
+			if ch == 'e':
+				# very safe assumption that urxvt and host has the same font size
+				# and that host-terminal is running fullscreen but urxvt won't be
+				geom = '{}x{}'.format(scr_w, scr_h - 1).encode('ascii')
+				
+				if VT100:
+					try:
+						sp.Popen([
+							b'urxvt', b'-title', b'ranger', b'+sb', b'-bl', b'-geometry', geom, b'-e',
+							b'ranger', fsenc(fld1.path), fsenc(fld2.path) ])
+					except:
+						print('could not run urxvt and/or ranger')
+						time.sleep(1)
+				else:
+					sp.Popen(['explorer.exe', fld1.path])
+					time.sleep(0.5)  # orz
+					sp.Popen(['explorer.exe', fld2.path])
+				
+				# we could poke urxvt into maximized after startup
+				# but that looks bad and why is this even necessary idgi
+				if False:
+					for n in range(5):
+						time.sleep(0.1)
+						sp.Popen(['wmctrl', '-r', ':ACTIVE:', '-b', 'add,fullscreen'])
+			
+			if ch == 'r':
+				pass  # redraw
+			
+			# start with just the header
+			scrn = '\033[H\033[0;1;40m{idupe} / {ndupes}  \033[{sc_c}m{sc_v}%\033[0;40m  ←dupe→  ↑screen↓  E/Q  \033[0;36;40m{gt1:.2f}s + {gt2:.2f}s\n\033[0m'.format(
+				idupe = idupe + 1,
+				ndupes = len(self.dupes),
+				sc_c = colorize_score(score),
+				sc_v = int(score*100),
+				gt1 = self.gen_time[0],
+				gt2 = self.gen_time[1]
+			)
+			
+			# adding the two folder paths,
+			# start by finding the longest parent-path and folder name,
+			# if these fit within scr_w we can align the paths on the last /
+			sep = '{}'.format(os.path.sep)
+			max_parent = 0
+			max_leaf = 0
+			paths = [fld1.path, fld2.path]
+			for path in paths:
+				try:
+					a, b = path.rsplit(sep, 1)
+				except:
+					a = ''
+					b = path
+				
+				max_parent = max(max_parent, len(a))
+				max_leaf = max(max_leaf, len(b)+1)
+			
+			# center_pad is set to the padding amount if we can align on /
+			# otherwise the paths are left-aligned and maybe truncated
+			center_pad = 0
+			if max_parent + max_leaf < scr_w:
+				center_pad = int((scr_w - (max_parent + max_leaf)) / 2)
+			
+			for path in paths:
+				spent = center_pad
+				scrn += ' ' * center_pad
+				
+				try:
+					a, b = termsafe(path).rsplit(sep, 1)
+				except:
+					a = ''
+					b = termsafe(path)
+
+				b = sep + b
+				ln = max_parent - len(a)
+				scrn += ' ' * ln
+				spent += ln
+				
+				scrn += '\033[0;36m' + a
+				spent += len(a)
+				
+				b = b[:scr_w-spent]
+				scrn += '\033[1;37m' + b + '\033[0m'
+				spent += len(b)
+				
+				scrn += ' ' * (scr_w - spent)
+			
+			# the left and right panels listing the two folders
+			def asdf(fld):
+				try:
+					statlist = read_folder(fld.path)
+				except:
+					statlist = [[-3, -3, 'folder 404 (press U to rescan)']]
+				
+				sizes = [x[0] for x in statlist]
+				return statlist, sizes
+			
+			statlist1, sizes1 = asdf(fld1)
+			statlist2, sizes2 = asdf(fld2)
+			pan1 = draw_panel(panel_w, statlist1, sizes2)
+			pan2 = draw_panel(panel_w, statlist2, sizes1)
+			file_rows = []
+			
+			# this is probably where the view branches will merge
+			
+			panel_viewport_h = scr_h - 3
+		
+			if ch == 'w':
+				scr_y = max(scr_y - panel_viewport_h, 0)
+			
+			if ch == 's':
+				scr_y += panel_viewport_h
+			
+			# clamp panels to fit vertically
+			tallest_panel = max(len(pan1), len(pan2))
+			max_scr_y = max(0, tallest_panel - panel_viewport_h)
+			if scr_y > max_scr_y:
+				scr_y = max_scr_y
+			
+			pan1 = pan1[scr_y : scr_y + panel_viewport_h]
+			pan2 = pan2[scr_y : scr_y + panel_viewport_h]
+
+			scrollbar_y = int(panel_viewport_h * (scr_y / tallest_panel))
+			scrollbar_h = int(math.ceil(panel_viewport_h * (panel_viewport_h / tallest_panel)))
+			scrollbar = \
+				(['\033[0;1;34m|'] * scrollbar_y) + \
+				(['\033[0;1;46;37m|'] * scrollbar_h)
+			
+			scrollbar.extend(['\033[0;1;34m|'] * (panel_viewport_h - len(scrollbar)))
+			
+			y=3
+			while pan1 or pan2:
+				y += 1
+				v = []
+				for pan in [pan1,pan2]:
+					if pan:
+						v.append(pan.pop(0))
+					else:
+						v.append(' ' * panel_w)
+				
+				file_rows.append(
+					#'{}\033[1;34m|\033[0m{}\033[0m'.format(*v))
+					'\033[{y}H\033[0m\033[K{f1}\033[{y};{x}H{scrollbar}\033[0m{f2}\033[0m'.format(
+						y=y,
+						x=panel_w+1,
+						f1=termsafe(v[0]),
+						f2=termsafe(v[1]),
+						scrollbar=scrollbar.pop(0)))
+			
+			scrn += '\n'.join(file_rows)
+			scrn = scrn.replace('\n', '\033[K\n') + '\033[J'
 			
 			if VT100:
-				try:
-					sp.Popen([
-						b'urxvt', b'-title', b'ranger', b'+sb', b'-bl', b'-geometry', geom, b'-e',
-						b'ranger', fsenc(fld1.path), fsenc(fld2.path) ])
-				except:
-					print('could not run urxvt and/or ranger')
-					time.sleep(1)
+				print(scrn, end='')
 			else:
-				sp.Popen(['explorer.exe', fld1.path])
-				time.sleep(0.5)  # orz
-				sp.Popen(['explorer.exe', fld2.path])
+				wprint(scrn)
 			
-			# we could poke urxvt into maximized after startup
-			# but that looks bad and why is this even necessary idgi
-			if False:
-				for n in range(5):
-					time.sleep(0.1)
-					sp.Popen(['wmctrl', '-r', ':ACTIVE:', '-b', 'add,fullscreen'])
-		
-		if ch == 'r':
-			pass  # redraw
-		
-		if score < 0.2:
-			score_color = '1;30'
-		elif score < 0.35:
-			score_color = '0;31'
-		elif score < 0.5:
-			score_color = '0;36'
-		elif score < 0.7:
-			score_color = '0;33'
-		elif score < 0.9:
-			score_color = '1;32'
-		else:
-			score_color = '1;37;44;48;5;28'
-		
-		# start with just the header
-		scrn = '\033[H\033[0;1;40m{idupe} / {ndupes}  \033[{sc_c}m{sc_v}%\033[0;36;40m  {gt1:.2f}s + {gt2:.2f}s\n\033[0m'.format(
-			idupe = idupe + 1,
-			ndupes = len(dupes),
-			sc_c = score_color,
-			sc_v = int(score*100),
-			gt1 = gen_time[0],
-			gt2 = gen_time[1]
-		)
-		
-		# adding the two folder paths,
-		# start by finding the longest parent-path and folder name,
-		# if these fit within scr_w we can align the paths on the last /
-		sep = '{}'.format(os.path.sep)
-		max_parent = 0
-		max_leaf = 0
-		paths = [fld1.path, fld2.path]
-		for path in paths:
-			try:
-				a, b = path.rsplit(sep, 1)
-			except:
-				a = ''
-				b = path
+			ch = getch()
+			print('\033[G\r\033[K', end='')  # repurpose last line
 			
-			max_parent = max(max_parent, len(a))
-			max_leaf = max(max_leaf, len(b)+1)
-		
-		# center_pad is set to the padding amount if we can align on /
-		# otherwise the paths are left-aligned and maybe truncated
-		center_pad = 0
-		if max_parent + max_leaf < scr_w:
-			center_pad = int((scr_w - (max_parent + max_leaf)) / 2)
-		
-		for path in paths:
-			spent = center_pad
-			scrn += ' ' * center_pad
+			if ch in ['\003']:
+				return 'x'
 			
-			try:
-				a, b = termsafe(path).rsplit(sep, 1)
-			except:
-				a = ''
-				b = termsafe(path)
-
-			b = sep + b
-			ln = max_parent - len(a)
-			scrn += ' ' * ln
-			spent += ln
-			
-			scrn += '\033[0;36m' + a
-			spent += len(a)
-			
-			b = b[:scr_w-spent]
-			scrn += '\033[1;37m' + b + '\033[0m'
-			spent += len(b)
-			
-			scrn += ' ' * (scr_w - spent)
-		
-		# the left and right panels listing the two folders
-		def asdf(fld):
-			try:
-				statlist = read_folder(fld.path)
-			except:
-				statlist = [[-3, -3, 'folder 404 (press U to rescan)']]
-			
-			sizes = [x[0] for x in statlist]
-			return statlist, sizes
-		
-		statlist1, sizes1 = asdf(fld1)
-		statlist2, sizes2 = asdf(fld2)
-		pan1 = draw_panel(panel_w, statlist1, sizes2)
-		pan2 = draw_panel(panel_w, statlist2, sizes1)
-		file_rows = []
-		
-		# this is probably where the view branches will merge
-		
-		panel_viewport_h = scr_h - 3
-	
-		if ch == 'w':
-			scr_y = max(scr_y - panel_viewport_h, 0)
-		
-		if ch == 's':
-			scr_y += panel_viewport_h
-		
-		# clamp panels to fit vertically
-		tallest_panel = max(len(pan1), len(pan2))
-		max_scr_y = max(0, tallest_panel - panel_viewport_h)
-		if scr_y > max_scr_y:
-			scr_y = max_scr_y
-		
-		pan1 = pan1[scr_y : scr_y + panel_viewport_h]
-		pan2 = pan2[scr_y : scr_y + panel_viewport_h]
-
-		scrollbar_y = int(panel_viewport_h * (scr_y / tallest_panel))
-		scrollbar_h = int(math.ceil(panel_viewport_h * (panel_viewport_h / tallest_panel)))
-		scrollbar = \
-			(['\033[0;1;34m|'] * scrollbar_y) + \
-			(['\033[0;1;46;37m|'] * scrollbar_h)
-		
-		scrollbar.extend(['\033[0;1;34m|'] * (panel_viewport_h - len(scrollbar)))
-		
-		y=3
-		while pan1 or pan2:
-			y += 1
-			v = []
-			for pan in [pan1,pan2]:
-				if pan:
-					v.append(pan.pop(0))
-				else:
-					v.append(' ' * panel_w)
-			
-			file_rows.append(
-				#'{}\033[1;34m|\033[0m{}\033[0m'.format(*v))
-				'\033[{y}H\033[0m\033[K{f1}\033[{y};{x}H{scrollbar}\033[0m{f2}\033[0m'.format(
-					y=y,
-					x=panel_w+1,
-					f1=termsafe(v[0]),
-					f2=termsafe(v[1]),
-					scrollbar=scrollbar.pop(0)))
-		
-		scrn += '\n'.join(file_rows)
-		scrn = scrn.replace('\n', '\033[K\n') + '\033[J'
-		
-		if VT100:
-			print(scrn, end='')
-		else:
-			wprint(scrn)
-		
-		ch = getch()
-		if ch in ['\003']:
-			return 'x'
-		
-		if ch == 'u':
-			return ch
+			if ch in ['u', 'q']:
+				return ch
 
 
 def main():
 	if len(sys.argv) < 2:
-		print('give me folders to scan as arguments')
+		print('give me folders to scan as arguments,')
 		print('for example "." for current folder')
 		sys.exit(1)
+	
+	roots = []
+	for root in sys.argv[1:]:
+		roots.append(os.path.abspath(os.path.realpath(root)))
 	
 	cache_path = os.path.join(tempfile.gettempdir(), 'smf.cache')
 	print('using', cache_path)
 
+	view = 1
+	tui = TUI(os.path.abspath(os.path.realpath(os.getcwd())))
+	
+	dupes = []
 	while True:
-		if os.path.isfile(cache_path):
-			print('loading cache')
-			dupes = load_dupe_map(cache_path)
-			gen_time = [0., 0.]
-		else:
-			dupes, gen_time = gen_dupe_map(sys.argv[1:])
-			print('saving cache')
-			save_dupe_map(cache_path, dupes)
+		if not dupes:
+			if os.path.isfile(cache_path):
+				print('loading cache')
+				dupes = load_dupe_map(cache_path)
+				gen_time = [0., 0.]
+			else:
+				dupes, gen_time = gen_dupe_map(roots)
+				print('saving cache')
+				save_dupe_map(cache_path, dupes)
+				tui.gen_time = gen_time
+		
+			tui.set_dupes(dupes)
 		
 		if not dupes:
 			print('you have no dupes ;_;')
 			os.remove(cache_path)
 			return
+
+		if view == 1:
+			rv = tui.foldercomp()
+		else:
+			rv = tui.tree()
 		
-		#return
-		#dump_summary()
-		rv = gui(dupes, gen_time)
+		if rv == 'q':
+			view += 1
+			if view > 2:
+				view = 1
 		
 		if rv == 'x':
 			return
 		
 		if rv == 'u':
+			dupes = None
 			os.remove(cache_path)
 
 
