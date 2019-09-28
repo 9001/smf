@@ -7,6 +7,7 @@ import os
 import sys
 import stat
 import time
+import math
 import gzip
 import struct
 import tempfile
@@ -495,16 +496,19 @@ def draw_panel(panel_w, statlist, other_sizes):
 def gui(dupes, gen_time):
 	ch = None
 	idupe = 0
+	scr_y = 0
 	while True:
 		scr_w, scr_h = termsize()
 		panel_w = int(((scr_w + 1) / 2) - 1)
 		
-		if ch == 'w':
+		if ch == 'a':
+			scr_y = 0
 			idupe -= 1
 			if idupe < 0:
 				idupe = len(dupes)-1
 		
-		if ch == 's':
+		if ch == 'd':
+			scr_y = 0
 			idupe += 1
 			if idupe >= len(dupes):
 				idupe = 0
@@ -622,9 +626,36 @@ def gui(dupes, gen_time):
 		
 		statlist1, sizes1 = asdf(fld1)
 		statlist2, sizes2 = asdf(fld2)
-		pan1 = draw_panel(panel_w, statlist1, sizes2)[:scr_h-3]
-		pan2 = draw_panel(panel_w, statlist2, sizes1)[:scr_h-3]
+		pan1 = draw_panel(panel_w, statlist1, sizes2)
+		pan2 = draw_panel(panel_w, statlist2, sizes1)
 		file_rows = []
+		
+		# this is probably where the view branches will merge
+		
+		panel_viewport_h = scr_h - 3
+	
+		if ch == 'w':
+			scr_y = max(scr_y - panel_viewport_h, 0)
+		
+		if ch == 's':
+			scr_y += panel_viewport_h
+		
+		# clamp panels to fit vertically
+		tallest_panel = max(len(pan1), len(pan2))
+		max_scr_y = max(0, tallest_panel - panel_viewport_h)
+		if scr_y > max_scr_y:
+			scr_y = max_scr_y
+		
+		pan1 = pan1[scr_y : scr_y + panel_viewport_h]
+		pan2 = pan2[scr_y : scr_y + panel_viewport_h]
+
+		scrollbar_y = int(panel_viewport_h * (scr_y / tallest_panel))
+		scrollbar_h = int(math.ceil(panel_viewport_h * (panel_viewport_h / tallest_panel)))
+		scrollbar = \
+			(['\033[0;1;34m|'] * scrollbar_y) + \
+			(['\033[0;1;46;37m|'] * scrollbar_h)
+		
+		scrollbar.extend(['\033[0;1;34m|'] * (panel_viewport_h - len(scrollbar)))
 		
 		y=3
 		while pan1 or pan2:
@@ -638,8 +669,8 @@ def gui(dupes, gen_time):
 			
 			file_rows.append(
 				#'{}\033[1;34m|\033[0m{}\033[0m'.format(*v))
-				'\033[{y}H\033[0m\033[K{f1}\033[{y};{x}H\033[0;1;34m|\033[0m{f2}\033[0m'.format(
-					y=y, x=panel_w+1, f1=v[0], f2=v[1]))
+				'\033[{y}H\033[0m\033[K{f1}\033[{y};{x}H{scrollbar}\033[0m{f2}\033[0m'.format(
+					y=y, x=panel_w+1, f1=v[0], f2=v[1], scrollbar=scrollbar.pop(0)))
 		
 		scrn += '\n'.join(file_rows)
 		scrn = scrn.replace('\n', '\033[K\n') + '\033[J'
