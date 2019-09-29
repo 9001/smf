@@ -662,6 +662,7 @@ class TUI(object):
 	def tree(self):
 		if not self.fs:
 			print('\033[36mbuilding directory tree...\033[0m')
+			errors = []
 			self.fs = FSDir('/')
 			for score, fld1, fld2 in self.dupes:
 				for path in [fld1.path, fld2.path]:
@@ -673,8 +674,15 @@ class TUI(object):
 							if not fsnode.dirs and not fsnode.files:
 								self.fs.build_until(path + '/')
 						except:
-							self.fs.build_until(path + '/')
-							fsnode = fsnode.dirs[pathnode]
+							# this one is fine,
+							# just means we haven't visited it yet
+							try:
+								self.fs.build_until(path + '/')
+								fsnode = fsnode.dirs[pathnode]
+							except:
+								# ok something actually went wrong
+								# (folder was probably deleted)
+								errors.append(pathnode)
 						
 						fsnode.smin = min(fsnode.smin, score)
 						fsnode.smax = max(fsnode.smax, score)
@@ -718,6 +726,14 @@ class TUI(object):
 					foo2(v, i_have_dupes)
 			
 			foo2(self.fs)
+			
+			if errors:
+				print('\nfailed to access the following directories:\n')
+				for error in errors:
+					print('--', error)
+				
+				print('\nis this ok? press ENTER to continue or CTRL-C\n')
+				input()
 		
 		tree = self.fs.format()
 
