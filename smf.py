@@ -913,6 +913,7 @@ press ENTER to quit this help view
 
 			if ch == 'q':
 				# find nearest folder in the dupeset
+				#import pudb; pu.db
 				for step in range(20):
 					for direction in [1, -1][:step + 1]:
 						step *= direction
@@ -936,9 +937,16 @@ press ENTER to quit this help view
 
 	def foldercomp(self):
 		if self.cur_path != self.dupes[self.fcmp_idx][1].path:
-			for n, (score, fld1, fld2) in enumerate(self.dupes):
-				if fld1.path == self.cur_path:
-					self.fcmp_idx = n
+			ok = False
+			self.fcmp_idx = 0
+			for side in [1, 2]:
+				for n, dupe_obj in enumerate(self.dupes):
+					if dupe_obj[side].path == self.cur_path:
+						self.fcmp_idx = n
+						ok = True
+						break
+				
+				if ok:
 					break
 		
 		ch = None
