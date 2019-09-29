@@ -10,6 +10,9 @@ import time
 import math
 import gzip
 import struct
+import pprint
+import base64
+import hashlib
 import tempfile
 import platform
 import threading
@@ -232,6 +235,7 @@ class DiskWalker(object):
 	def __init__(self, top):
 		self.cur_top = top
 		self.folders = []
+		self.errors = []
 		
 		thr = threading.Thread(target=self.logger)
 		thr.daemon = True
@@ -243,6 +247,11 @@ class DiskWalker(object):
 		self.cur_top = None
 		print('\033[32mleaving\033[0m', top)
 
+	def oof(self, *msg):
+		msg = ' '.join(str(x) for x in msg)
+		self.errors.append(msg)
+		print(msg)
+	
 	def logger(self):
 		last_top = None
 		while True:
@@ -266,7 +275,7 @@ class DiskWalker(object):
 			try:
 				sr = os.lstat(bpath)
 			except:
-				print('\033[1;31maccess denied:\033[0m', fsdec(bpath))
+				self.oof('\033[1;31maccess denied:\033[0m', fsdec(bpath))
 				continue
 			
 			mode = sr.st_mode
@@ -275,7 +284,7 @@ class DiskWalker(object):
 				continue
 			
 			elif sr.st_dev != dev_id:
-				print('\033[35mskipping mountpoint:\033[0m', fsdec(bpath))
+				self.oof('\033[35mskipping mountpoint:\033[0m', fsdec(bpath))
 			
 			elif stat.S_ISDIR(mode):
 				try:
@@ -283,7 +292,7 @@ class DiskWalker(object):
 				except KeyboardInterrupt:
 					raise
 				except:
-					print('\033[1;31maccess denied:\033[0m', fsdec(bpath))
+					self.oof('\033[1;31maccess denied:\033[0m', fsdec(bpath))
 
 			elif stat.S_ISREG(mode) and sr.st_size > 0:
 				folder.files.append(sr.st_size)
@@ -299,9 +308,18 @@ def gen_dupe_map(roots):
 	
 	t0 = time.time()
 	folders = []
+	errors = []
 	for root in roots:
 		dw = DiskWalker(root)
 		folders.extend(dw.folders)
+		errors.extend(dw.errors)
+	
+	if errors:
+		print('{} errors occurred:'.format(len(errors)))
+		for error in errors:
+			print(error)
+		
+		print('these will be repeated after the dupemap generation finishes')
 	
 	print("\ngenerating dupemap (hope you're using pypy w)")
 
@@ -317,7 +335,13 @@ def gen_dupe_map(roots):
 		if nth % 10 == 0:
 			print('{} / {}'.format(nth, remains))
 		
+		# fgsfds
+		#mnt = folder1.path[:8]
+		
 		for folder2 in folders[nth:]:
+			#if folder2.path.startswith(mnt):
+			#	continue
+			
 			# hits = each file size that matched,
 			# rhs = the remaining files in folder2 to check
 			# (to deal w/ multiple files of same size in one folder)
@@ -349,6 +373,15 @@ def gen_dupe_map(roots):
 			dupes.append([score, folder1, folder2])
 
 	t2 = time.time()
+	
+	if errors:
+		print('\nok so about those errors from before,')
+		for error in errors:
+			print(error)
+		
+		print('\nare these {} errors ok? press ENTER to continue or CTRL-C'.format(len(errors)))
+		input()
+	
 	return dupes, [t1-t0, t2-t1]
 
 
@@ -522,6 +555,7 @@ class FSDir(object):
 		self.smin = 9
 		self.smax = -9
 		self.scur = -9
+		self.dupesize = 0
 
 	def build_until(self, dest, extra_levels=1):
 		if extra_levels < 0 or (
@@ -575,8 +609,9 @@ class FSDir(object):
 		elif self.smin > 0: cdir = 3  # purely folders with dupes; yellow
 		else: cdir = 6  # wait what did i forget
 		
-		ret = '{scores} {pad}\033[0;3{cdir}m{path}\033[0m\n'.format(
+		ret = '{scores} {size:>5} {pad}\033[0;3{cdir}m{path}\033[0m\n'.format(
 			scores = scores,
+			size = int(self.dupesize / (1024*1024)),
 			pad = '{}\033[1;3{}m|'.format(' ' * (lv * 2 - 1), lv%8) if lv else '',
 			cdir = cdir,
 			path = self.path)
@@ -602,13 +637,25 @@ class FSDir(object):
 		return ret
 
 
+def get_dupe_size(fld1, fld2):
+	ret = 0
+	rhs = fld2.files[:]
+	for sz in fld1.files:
+		if sz in rhs:
+			ret += sz
+			rhs.remove(sz)
+
+	return ret
+
+
 class TUI(object):
 	def __init__(self, cur_path):
 		self.gen_time = [0,0]
 		self.cur_path = cur_path
-		self.fs = None
+		self.set_dupes(None)
 
 	def set_dupes(self, dupes):
+		self.fcmp_idx = 0
 		self.dupes = dupes
 		self.fs = None
 
@@ -633,6 +680,8 @@ class TUI(object):
 						fsnode.smax = max(fsnode.smax, score)
 					
 					fsnode.scur = max(fsnode.scur, score)
+					fsnode.dupesize = max(fsnode.dupesize,
+						get_dupe_size(fld1, fld2))
 			
 			# propagate unique folders up by resetting minimum score
 			def foo1(node):
@@ -673,7 +722,7 @@ class TUI(object):
 		tree = self.fs.format()
 
 		# TODO gui
-		header = '\033[0;1;40mmin% max% dir%\033[0m'
+		header = '\033[0;1;40mmin% max% dir%  size\033[0m'
 		print('\n' + header)
 		print(termsafe(tree))
 		#for ln in termsafe(tree).split('\n'):
@@ -689,7 +738,9 @@ second column is the highest dupe score below this point
 third column is xxx if there is no files in this folder,
 third column is numeric if there is duplicate files in this folder
 
- \033[47;48;5;28;1mgreen folders\033[0m are 100% dupes and safe to delete
+fourth column is disk space consumed by the dupes in megabytes
+
+ \033[1;37;44;48;5;28mgreen folders\033[0m are 100% dupes and safe to delete
 \033[33myellow folders\033[0m contain some dupes and so does all subfolders
 \033[35mpurple folders\033[0m have subfolders which are not dupes
    \033[31mred folders\033[0m contain only unique data
@@ -705,15 +756,19 @@ use shift-pgup/pgdn to scroll, Q to return, ^C to exit
 			
 			ch = getch()
 			if ch in ['\003']:
-				return 'x'
+				return 'x', None
 			
 			if ch in ['u', 'q']:
-				return ch
-
+				return ch, None
 
 	def foldercomp(self):
+		if self.cur_path != self.dupes[self.fcmp_idx][1].path:
+			for n, (score, fld1, fld2) in enumerate(self.dupes):
+				if fld1.path == self.cur_path:
+					self.fcmp_idx = n
+					break
+		
 		ch = None
-		idupe = 0
 		scr_y = 0
 		while True:
 			scr_w, scr_h = termsize()
@@ -721,17 +776,18 @@ use shift-pgup/pgdn to scroll, Q to return, ^C to exit
 			
 			if ch == 'a':
 				scr_y = 0
-				idupe -= 1
-				if idupe < 0:
-					idupe = len(self.dupes)-1
+				self.fcmp_idx -= 1
+				if self.fcmp_idx < 0:
+					self.fcmp_idx = len(self.dupes)-1
 			
 			if ch == 'd':
 				scr_y = 0
-				idupe += 1
-				if idupe >= len(self.dupes):
-					idupe = 0
+				self.fcmp_idx += 1
+				if self.fcmp_idx >= len(self.dupes):
+					self.fcmp_idx = 0
 			
-			score, fld1, fld2 = self.dupes[idupe]
+			score, fld1, fld2 = self.dupes[self.fcmp_idx]
+			self.cur_path = fld1.path
 			
 			if ch == 'e':
 				# very safe assumption that urxvt and host has the same font size
@@ -745,7 +801,7 @@ use shift-pgup/pgdn to scroll, Q to return, ^C to exit
 							b'ranger', fsenc(fld1.path), fsenc(fld2.path) ])
 					except:
 						print('could not run urxvt and/or ranger')
-						time.sleep(1)
+						time.sleep(0.5)
 				else:
 					sp.Popen(['explorer.exe', fld1.path])
 					time.sleep(0.5)  # orz
@@ -763,7 +819,7 @@ use shift-pgup/pgdn to scroll, Q to return, ^C to exit
 			
 			# start with just the header
 			scrn = '\033[H\033[0;1;40m{idupe} / {ndupes}  \033[{sc_c}m{sc_v}%\033[0;40m  ←dupe→  ↑screen↓  E/Q  \033[0;36;40m{gt1:.2f}s + {gt2:.2f}s\n\033[0m'.format(
-				idupe = idupe + 1,
+				idupe = self.fcmp_idx + 1,
 				ndupes = len(self.dupes),
 				sc_c = colorize_score(score),
 				sc_v = int(score*100),
@@ -892,10 +948,64 @@ use shift-pgup/pgdn to scroll, Q to return, ^C to exit
 			print('\033[G\r\033[K', end='')  # repurpose last line
 			
 			if ch in ['\003']:
-				return 'x'
+				return 'x', None
 			
 			if ch in ['u', 'q']:
-				return ch
+				return ch, None
+
+			if ch == 'h':
+				# dump the folders and let core handle the rest
+				ret = []
+				for path, statlist in [
+					[fld1.path, statlist1],
+					[fld2.path, statlist2]
+				]:
+					fret = []
+					for sz, ts, fn in statlist:
+						fret.append([sz, ts, os.path.join(path, fn)])
+					
+					ret.append(fret)
+				
+				return ch, ret
+
+
+def hashfile(fpath, fsize):
+	t0 = time.time()
+	fpos = 0
+	next_print = 0
+	print_interval = 1024*1024*32
+	last_print_pos = 0
+	last_print_ts = t0
+	
+	hasher = hashlib.sha1()
+	with open(fpath, 'rb', 512*1024) as f:
+		while True:
+			if fpos >= next_print:
+				now = time.time()
+				time_delta = now - last_print_ts
+				bytes_delta = fpos - last_print_pos
+				if bytes_delta <= 0 or time_delta <= 0:
+					perc = 0
+					speed = 0
+				else:
+					perc = (100. * fpos) / fsize
+					speed = ((
+						(fpos - last_print_pos) /
+						(now - last_print_ts)) /
+						(1024. * 1024))
+				
+				print('\033[A{:6.2f}% @ {:8.2f} MiB/s  {}'.format(
+					perc, speed, fpath))
+			
+			data = f.read(512*1024)
+			if not data:
+				break
+			
+			hasher.update(data)
+			fpos += len(data)
+	
+	return base64.b64encode(hasher.digest()
+		).decode('ascii').rstrip('='), time.time() - t0
 
 
 def main():
@@ -909,10 +1019,19 @@ def main():
 		roots.append(os.path.abspath(os.path.realpath(root)))
 	
 	cache_path = os.path.join(tempfile.gettempdir(), 'smf.cache')
+	sha1_path = os.path.join(tempfile.gettempdir(), 'smf.sha1')
 	print('using', cache_path)
+	print('using', sha1_path)
 
 	view = 1
 	tui = TUI(os.path.abspath(os.path.realpath(os.getcwd())))
+	
+	hashtab = {}
+	if os.path.exists(sha1_path):
+		with open(sha1_path, 'rb') as f:
+			for ln in f:
+				sha1, sz, ts, fn = ln.decode('utf-8').split(' ', 3)
+				hashtab[fn.rstrip()] = [int(ts), sha1]
 	
 	dupes = []
 	while True:
@@ -935,9 +1054,9 @@ def main():
 			return
 
 		if view == 1:
-			rv = tui.foldercomp()
+			rv, extra = tui.foldercomp()
 		else:
-			rv = tui.tree()
+			rv, extra = tui.tree()
 		
 		if rv == 'q':
 			view += 1
@@ -950,6 +1069,71 @@ def main():
 		if rv == 'u':
 			dupes = None
 			os.remove(cache_path)
+		
+		if rv == 'h':
+			#pprint.pprint(extra)
+			hashq = []
+			d1, d2 = extra
+			for sz1, ts1, fn1 in d1:
+				hit = next((x for x in d2 if x[0] == sz1), None)
+				if hit:
+					hashq.extend([[sz1, ts1, fn1], hit])
+					d2.remove(hit)
+			
+			#pprint.pprint(hashq)
+			print('\nperforming binary comparison of the following files:')
+			for sz, ts, fn in hashq:
+				hts = datetime.utcfromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+				print('{:12} {} {}'.format(sz, hts, fn))
+			
+			print('\n')
+			new_hashes = []
+			comp_hash = None
+			for sz, ts, fn in hashq:
+				ts = int(ts)
+				
+				sha1 = None
+				if fn in hashtab:
+					tab_ts, tab_sha1 = hashtab[fn]
+					if tab_ts == ts:
+						sha1 = tab_sha1
+						speed = 0
+				
+				if not sha1:
+					sha1, time_spent = hashfile(fn, sz)
+					new_hashes.append([sha1, sz, ts, fn])
+					hashtab[fn] = [int(ts), sha1]
+					
+					speed = (sz * 1.0 / time_spent) / (1024. * 1024)
+				
+				if comp_hash == None:
+					comp_hash = sha1
+					color1 = 3
+					color2 = 3
+				else:
+					if comp_hash == sha1:
+						color1 = '7;44;48;5;28;1'
+						color2 = 2
+					else:
+						color1 = '7;41'
+						color2 = 1
+					
+					comp_hash = None
+
+				print('\033[A\033[3{c1}m{hash}\033[0;3{c2}m  {fn}\033[0;36m ({spd:.2f} MiB/s)\033[0m\n'.format(
+					c1 = color1,
+					c2 = color2,
+					hash = sha1,
+					fn = fn,
+					spd = speed))
+			
+			with open(sha1_path, 'ba+') as f:
+				for item in new_hashes:
+					ln = ' '.join(str(x) for x in item) + '\n'
+					f.write(ln.encode('utf-8', ENC_FILTER))
+			
+			print('done, hit ENTER to return')
+			input()
 
 
 def prof_collect():
