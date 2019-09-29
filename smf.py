@@ -784,11 +784,21 @@ class TUI(object):
 				print('\nis this ok? press ENTER to continue or CTRL-C\n')
 				input()
 		
-		header = '\033[0;1;40m  min% max% dir%   size  //  ←dupe→  ↑screen↓  Q  \033[0m'
-		tree = self.fs.gen()
-		ch = None
+		tree = []
+		self.fs.gen(tree)
+		
 		scr_y = 0
 		dir_ptr = 0
+		for n, (path, _, _) in enumerate(tree):
+			if path == self.cur_path + '/':
+				scr_w, scr_h = termsize()
+				scr_y = int(max(0, n - scr_h / 2.5))
+				dir_ptr = n
+				break
+
+		ch = None
+		header = '\033[0;1;40m  min% max% dir%   size  //  ←dupe→  ↑screen↓  Q  \033[0m'
+		
 		while True:
 			scr_w, scr_h = termsize()
 			
@@ -860,7 +870,8 @@ class TUI(object):
 						gutter=gutter,
 						scores=scores,
 						lc=line_color,
-						line=termsafe(line)[:(scr_w - 3)-len(scores)]))
+						line=termsafe(line)[:(scr_w - 5)]))
+						# TODO affected by ansi stuff ^
 			
 			scrn += '\n'.join(rows)
 			scrn = scrn.replace('\n', '\033[K\n') + '\033[J'
@@ -900,7 +911,27 @@ press ENTER to quit this help view
 """)
 				input()
 
-			if ch in ['u', 'q']:
+			if ch == 'q':
+				# find nearest folder in the dupeset
+				for step in range(20):
+					for direction in [1, -1][:step + 1]:
+						step *= direction
+						n = dir_ptr + step
+						if n < 0 or n >= len(tree):
+							continue
+						
+						needle = tree[n][0][:-1]
+						for _, fld1, fld2 in self.dupes:
+							for fld in [fld1, fld2]:
+								if needle == fld.path:
+									self.cur_path = fld.path
+									return ch, None
+				
+				# can't be helped
+				self.cur_path = self.dupes[0][1].path
+				return ch, None
+			
+			if ch == 'u':
 				return ch, None
 
 	def foldercomp(self):
