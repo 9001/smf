@@ -807,10 +807,10 @@ class TUI(object):
 			scrn = '\033[H' + header + '\n'
 			panel_viewport_h = scr_h - 1
 			
-			if ch in ['w', 's']:
-				if ch == 'w':
+			if ch in ['a', 'd']:
+				if ch == 'a':
 					scr_y = max(scr_y - panel_viewport_h, 0)
-				elif ch == 's':
+				elif ch == 'd':
 					scr_y += panel_viewport_h
 				
 				max_scr_y = max(0, len(tree) - panel_viewport_h)
@@ -822,10 +822,10 @@ class TUI(object):
 				elif dir_ptr >= scr_y + panel_viewport_h:
 					dir_ptr = scr_y + panel_viewport_h - 1
 			
-			elif ch in ['a', 'd', 'scroll_up', 'scroll_down']:
-				if ch == 'a':
+			elif ch in ['w', 's', 'scroll_up', 'scroll_down']:
+				if ch == 'w':
 					dir_ptr -= 1
-				elif ch == 'd':
+				elif ch == 's':
 					dir_ptr += 1
 				elif ch == 'scroll_up':
 					dir_ptr -= 1
@@ -931,7 +931,7 @@ press ENTER to quit this help view
 				self.cur_path = self.dupes[0][1].path
 				return ch, None
 			
-			if ch == 'u':
+			if ch in ['r', 'u']:
 				return ch, None
 
 	def foldercomp(self):
@@ -991,11 +991,12 @@ press ENTER to quit this help view
 				pass  # redraw
 			
 			# start with just the header
+			csc = colorize_score(score)
 			scrn = '\033[H\033[0;1;40m{idupe} / {ndupes}  \033[{sc_c}m{sc_v}%\033[0;40m  ←dupe→  ↑screen↓  E/Q  \033[0;36;40m{gt1:.2f}s + {gt2:.2f}s\n\033[0m'.format(
 				idupe = self.fcmp_idx + 1,
 				ndupes = len(self.dupes),
-				sc_c = colorize_score(score),
-				sc_v = int(score*100),
+				sc_c = csc[0],
+				sc_v = csc[1],
 				gt1 = self.gen_time[0],
 				gt2 = self.gen_time[1]
 			)
@@ -1101,7 +1102,6 @@ press ENTER to quit this help view
 						v.append(' ' * panel_w)
 				
 				file_rows.append(
-					#'{}\033[1;34m|\033[0m{}\033[0m'.format(*v))
 					'\033[{y}H\033[0m\033[K{f1}\033[{y};{x}H{scrollbar}\033[0m{f2}\033[0m'.format(
 						y=y,
 						x=panel_w+1,
@@ -1123,7 +1123,7 @@ press ENTER to quit this help view
 			if ch == '\003':
 				return 'x', None
 			
-			if ch in ['u', 'q']:
+			if ch in ['r', 'u', 'q']:
 				return ch, None
 
 			if ch == 'h':
@@ -1181,6 +1181,43 @@ def hashfile(fpath, fsize):
 		).decode('ascii').rstrip('='), time.time() - t0
 
 
+def remove_deleted_folders(dupes):
+	# quickrefresh; drops deleted folders from cache
+	# (single deleted files is not worth)
+	tested = {}
+	ok = {}
+	ng = {}
+	newdupes = []
+	for dupe in dupes:
+		_, fld1, fld2 = dupe
+		for fld in [fld1, fld2]:
+			path = fld.path
+			if path in tested:
+				continue
+			
+			tested[path] = 1
+			
+			if os.path.exists(path):
+				ok[path] = 1
+			else:
+				print('forgetting', path)
+				ng[path] = 1
+		
+		if fld1.path in ok \
+		and fld2.path in ok:
+			newdupes.append(dupe)
+	
+	if ng:
+		print("""
+removed {} deleted folders from the cache
+(this removes {} dupes from the cache btw)
+hit ENTER to save and continue, or press CTRL-C
+""".format(len(ng.items()), len(dupes) - len(newdupes)))
+		input()
+
+	return ok, ng, newdupes
+
+
 def main():
 	if len(sys.argv) < 2:
 		print('give me folders to scan as arguments,')
@@ -1214,10 +1251,13 @@ def main():
 	dupes = []
 	while True:
 		if not dupes:
+			gen_time = [0., 0.]
 			if os.path.isfile(cache_path):
 				print('loading cache')
-				dupes = load_dupe_map(cache_path)
-				gen_time = [0., 0.]
+				xdupes = load_dupe_map(cache_path)
+				ok, ng, dupes = remove_deleted_folders(xdupes)
+				if len(dupes) != len(xdupes):
+					save_dupe_map(cache_path, dupes)
 			else:
 				dupes, gen_time = gen_dupe_map(roots)
 				print('saving cache')
@@ -1244,6 +1284,11 @@ def main():
 		if rv == 'x':
 			return
 		
+		if rv == 'r':
+			ok, ng, dupes = remove_deleted_folders(dupes)
+			save_dupe_map(cache_path, dupes)
+			tui.set_dupes(dupes)
+		
 		if rv == 'u':
 			dupes = None
 			os.remove(cache_path)
@@ -1266,9 +1311,13 @@ def main():
 			
 			print('\n')
 			new_hashes = []
+			mismatches = []
 			comp_hash = None
 			for sz, ts, fn in hashq:
 				ts = int(ts)
+				
+				if sz <= 0:
+					continue
 				
 				sha1 = None
 				if fn in hashtab:
@@ -1293,6 +1342,7 @@ def main():
 						color1 = 2
 						color2 = 2
 					else:
+						mismatches.append(fn)
 						color1 = '7;41;1'
 						color2 = '1;1'
 					
@@ -1310,7 +1360,15 @@ def main():
 					ln = ' '.join(str(x) for x in item) + '\n'
 					f.write(ln.encode('utf-8', ENC_FILTER))
 			
-			print('done, hit ENTER to return')
+			if mismatches:
+				print('{} files are NOT OK:'.format(len(mismatches)))
+				for fn in mismatches:
+					print(fn)
+				
+				print('hit ENTER')
+			else:
+				print('everything is OK, hit ENTER to return')
+			
 			input()
 
 
