@@ -15,6 +15,7 @@ import base64
 import hashlib
 import tempfile
 import platform
+import builtins
 import threading
 import subprocess as sp
 from datetime import datetime
@@ -215,6 +216,20 @@ def fsenc(path):
 
 def fsdec(path):
 	return path.decode(FS_ENCODING, ENC_FILTER)
+
+
+def termsafe(txt):
+	try:
+		return txt.encode(TERM_ENCODING, 'backslashreplace').decode(TERM_ENCODING)
+	except:
+		return txt.encode(TERM_ENCODING, 'replace').decode(TERM_ENCODING)
+
+
+def print(*args, **kwargs):
+	try:
+		builtins.print(*list(args), **kwargs)
+	except:
+		builtins.print(termsafe(' '.join(str(x) for x in args)), **kwargs)
 
 
 class Folder(object):
@@ -540,21 +555,14 @@ def draw_panel(panel_w, statlist, other_sizes):
 	return ret
 
 
-def termsafe(txt):
-	try:
-		return txt.encode(TERM_ENCODING, 'backslashreplace').decode(TERM_ENCODING)
-	except:
-		return txt.encode(TERM_ENCODING, 'replace').decode(TERM_ENCODING)
-
-
 class FSDir(object):
 	def __init__(self, path):
 		self.path = path
 		self.dirs = {}
 		self.files = []
-		self.smin = 9
+		self.smin = 0
 		self.smax = -9
-		self.scur = -9
+		self.scur = -2  # extralevel (unvisited)
 		self.dupesize = 0
 
 	def build_until(self, dest, extra_levels=1):
@@ -565,6 +573,7 @@ class FSDir(object):
 			raise Exception('\n[{}]  # self\n[{}]  # dest\n[{}]'.format(
 				self.path, dest, extra_levels))
 		
+		self.scur = -1  # visited + zero files
 		if self.path.startswith(dest):
 			extra_levels -= 1
 		
@@ -599,13 +608,13 @@ class FSDir(object):
 	
 	def format(self, lv=0):
 		scores = ''.join(['\033[{}m{:>3}%\033[0m '.format(x, y) for x, y in [
-			colorize_score("xxx" if self.smin > 7 else self.smin),
+			colorize_score(self.smin),
 			colorize_score("xxx" if self.smax < -7 else self.smax),
-			colorize_score("xxx" if self.scur < -7 else self.scur)]])
+			colorize_score("xxx" if self.scur < 0 else self.scur)]])
 
 		if self.smin == 1: cdir = '7;48;5;28;1' # purely dupes; green
 		elif self.smax < -7: cdir = 1  # purely unique; red
-		elif self.smin > 7: cdir = 5  # contains unique folders; purple
+		elif self.smin <= 0.01: cdir = 5  # contains unique folders; purple
 		elif self.smin > 0: cdir = 3  # purely folders with dupes; yellow
 		else: cdir = 6  # wait what did i forget
 		
@@ -683,27 +692,34 @@ class TUI(object):
 								# ok something actually went wrong
 								# (folder was probably deleted)
 								errors.append(pathnode)
-						
-						fsnode.smin = min(fsnode.smin, score)
-						fsnode.smax = max(fsnode.smax, score)
 					
 					fsnode.scur = max(fsnode.scur, score)
 					fsnode.dupesize = max(fsnode.dupesize,
 						get_dupe_size(fld1, fld2))
 			
-			# propagate unique folders up by resetting minimum score
+			# set min/max scores
 			def foo1(node):
-				have_unique = False
+				smin = 1
+				smax = -9
 				for _, f in node.dirs.items():
-					if foo1(f):
-						have_unique = True
+					if f.path == '/dev/shm/smf/':
+						print('ya')
+					min2, max2 = foo1(f)
+					smin = min(smin, min2)
+					smax = max(smax, max2)
 				
-				if node.scur < 0:
-					have_unique = True
-				
-				if have_unique:
-					node.smin = 9
-					return True
+				# >0 = scored
+				# -1 = no_files
+				# -2 = unvisited
+				if node.scur >= 0:
+					smin = min(smin, node.scur)
+					smax = max(smax, node.scur)
+				elif node.scur == -2:
+					smin = 0
+
+				node.smin = smin
+				node.smax = smax
+				return smin, smax
 
 			foo1(self.fs)
 
@@ -711,11 +727,11 @@ class TUI(object):
 			def foo2(node, parent_has_dupes=False):
 				drop = []
 				for k, v in node.dirs.items():
-					if v.smax < -7:
+					if v.smax <= 0:
 						drop.append(k)
 				
 				# leave one leaf to indicate unique data within
-				i_have_dupes = node.scur > -7 or node.smax > -7
+				i_have_dupes = node.scur > 0 or node.smax > 0
 				if parent_has_dupes or i_have_dupes:
 					drop = drop[1:]
 				
@@ -1030,15 +1046,19 @@ def main():
 		print('for example "." for current folder')
 		sys.exit(1)
 	
-	roots = []
-	for root in sys.argv[1:]:
-		roots.append(os.path.abspath(os.path.realpath(root)))
-	
 	cache_path = os.path.join(tempfile.gettempdir(), 'smf.cache')
 	sha1_path = os.path.join(tempfile.gettempdir(), 'smf.sha1')
 	print('using', cache_path)
 	print('using', sha1_path)
 
+	roots = []
+	for root in sys.argv[1:]:
+		if root == '-u':
+			os.remove(cache_path)
+			os.remove(sha1_path)
+		else:
+			roots.append(os.path.abspath(os.path.realpath(root)))
+	
 	view = 1
 	tui = TUI(os.path.abspath(os.path.realpath(os.getcwd())))
 	
@@ -1128,11 +1148,11 @@ def main():
 					color2 = 3
 				else:
 					if comp_hash == sha1:
-						color1 = '7;44;48;5;28;1'
+						color1 = 2
 						color2 = 2
 					else:
-						color1 = '7;41'
-						color2 = 1
+						color1 = '7;41;1'
+						color2 = '1;1'
 					
 					comp_hash = None
 
@@ -1169,16 +1189,3 @@ if __name__ == '__main__':
 	main()
 	#prof_collect()
 	#prof_display()
-
-
-"""
-{
-printf 'p .%s\nf 1234\n' \
-/home/ed/t \
-/usr/share/icons/Adwaita/64x64/actions \
-/home/ed/t \
-/home/ed/t
-
-printf 'd 89 0 1\nd 69 2 3\neof\n'
-} | gzip -c > /dev/shm/smf.cache
-"""

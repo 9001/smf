@@ -11,7 +11,8 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "args": [
-                "/home/ed/Music/"
+                "/dev/shm/smf/",
+                "-u"
             ]
         }
     ]
