@@ -606,7 +606,7 @@ class FSDir(object):
 				or (path.startswith(dest) and extra_levels > 0):
 					subdir.build_until(dest, extra_levels)
 	
-	def format(self, lv=0):
+	def gen(self, ret = [], lv=0):
 		scores = ''.join(['\033[{}m{:>3}%\033[0m '.format(x, y) for x, y in [
 			colorize_score(self.smin),
 			colorize_score("xxx" if self.smax < -7 else self.smax),
@@ -618,18 +618,22 @@ class FSDir(object):
 		elif self.smin > 0: cdir = 3  # purely folders with dupes; yellow
 		else: cdir = 6  # wait what did i forget
 		
-		ret = '{scores} {size:>5} {pad}\033[0;3{cdir}m{path}\033[0m\n'.format(
-			scores = scores,
-			size = int(self.dupesize / (1024*1024)),
-			pad = '{}\033[1;3{}m|'.format(' ' * (lv * 2 - 1), lv%8) if lv else '',
-			cdir = cdir,
-			path = self.path)
+		# not all folders shown are dupes so don't necessarily have a fld,
+		# so using self.path since ram is cheap anyways
+		ret.append([
+			self.path,
+			scores,
+			'{size:>5} {pad}\033[0;3{cdir}m{path}\033[0m'.format(
+				size = int(self.dupesize / (1024*1024)),
+				pad = '{}\033[1;3{}m|'.format(' ' * (lv * 2 - 1), lv%8) if lv else '',
+				cdir = cdir,
+				path = self.path)])
 		
 		for _, p in sorted(self.dirs.items()):
-			ret += p.format(lv + 1)
+			p.gen(ret, lv + 1)
 		
-		if self.dirs and not ret.endswith('\n\n'):
-			ret += '\n'
+		if self.dirs and not ret[:1]:
+			ret.append(None)
 		
 		return ret
 
@@ -657,11 +661,40 @@ def get_dupe_size(fld1, fld2):
 	return ret
 
 
+class GetchInterp(object):
+	def __init__(self):
+		self.hist = ''
+
+	def g(self):
+		c = getch()
+		if c == '\033':
+			self.hist = c
+			return None
+		
+		if not self.hist:
+			return c
+		
+		if c == '[':
+			self.hist += c
+			return None
+		
+		if self.hist == '\033[':
+			if c == 'A':
+				return 'scroll_up'
+			if c == 'B':
+				return 'scroll_down'
+		
+		self.hist = None
+		return c
+
+
 class TUI(object):
 	def __init__(self, cur_path):
 		self.gen_time = [0,0]
 		self.cur_path = cur_path
 		self.set_dupes(None)
+		
+		self.getch = GetchInterp().g
 
 	def set_dupes(self, dupes):
 		self.fcmp_idx = 0
@@ -751,17 +784,100 @@ class TUI(object):
 				print('\nis this ok? press ENTER to continue or CTRL-C\n')
 				input()
 		
-		tree = self.fs.format()
+		header = '\033[0;1;40m  min% max% dir%   size  //  ←dupe→  ↑screen↓  Q  \033[0m'
+		tree = self.fs.gen()
+		ch = None
+		scr_y = 0
+		dir_ptr = 0
+		while True:
+			scr_w, scr_h = termsize()
+			
+			# duplicating the scrolling stuff for now,
+			# generalize once additional views materialize
+			scrn = '\033[H' + header + '\n'
+			panel_viewport_h = scr_h - 1
+			
+			if ch in ['w', 's']:
+				if ch == 'w':
+					scr_y = max(scr_y - panel_viewport_h, 0)
+				elif ch == 's':
+					scr_y += panel_viewport_h
+				
+				max_scr_y = max(0, len(tree) - panel_viewport_h)
+				if scr_y > max_scr_y:
+					scr_y = max_scr_y
+				
+				if dir_ptr < scr_y:
+					dir_ptr = scr_y
+				elif dir_ptr >= scr_y + panel_viewport_h:
+					dir_ptr = scr_y + panel_viewport_h - 1
+			
+			elif ch in ['a', 'd', 'scroll_up', 'scroll_down']:
+				if ch == 'a':
+					dir_ptr -= 1
+				elif ch == 'd':
+					dir_ptr += 1
+				elif ch == 'scroll_up':
+					dir_ptr -= 1
+				elif ch == 'scroll_down':
+					dir_ptr += 1
 
-		# TODO gui
-		header = '\033[0;1;40mmin% max% dir%  size\033[0m'
-		print('\n' + header)
-		print(termsafe(tree))
-		#for ln in termsafe(tree).split('\n'):
-		#	if '/m3-' in ln:
-		#		print(ln)
-		print(header)
-		print("""
+				if dir_ptr < 0:
+					dir_ptr = len(tree) - 1
+				elif dir_ptr >= len(tree):
+					dir_ptr = 0
+				
+				if scr_y > dir_ptr:
+					scr_y = dir_ptr
+				elif dir_ptr >= scr_y + panel_viewport_h:
+					scr_y = (dir_ptr - panel_viewport_h) + 1
+			
+			active_row = tree[dir_ptr]
+
+			scrollbar_y = int(panel_viewport_h * (scr_y / len(tree)))
+			scrollbar_h = int(math.ceil(panel_viewport_h * (panel_viewport_h / len(tree))))
+			scrollbar = \
+				(['\033[0;1;34m|'] * scrollbar_y) + \
+				(['\033[0;1;46;37m|'] * scrollbar_h)
+			
+			scrollbar.extend(['\033[0;1;34m|'] * (panel_viewport_h - len(scrollbar)))
+			
+			ansi_y = 1
+			rows = []
+			for row in tree[scr_y : scr_y + panel_viewport_h]:
+				path, scores, line = row
+				ansi_y += 1
+				
+				line_color = '\033[0m'
+				gutter = scrollbar.pop(0)
+				if row == active_row:
+					gutter = '\033[48;5;255m■\033[0m'
+					line_color = '\033[1;37;40m'
+				
+				rows.append(
+					'\033[{y}H{gutter}\033[0m \033[K{scores} {lc}{line}\033[0m'.format(
+						y=ansi_y,
+						gutter=gutter,
+						scores=scores,
+						lc=line_color,
+						line=termsafe(line)[:(scr_w - 3)-len(scores)]))
+			
+			scrn += '\n'.join(rows)
+			scrn = scrn.replace('\n', '\033[K\n') + '\033[J'
+			
+			if VT100:
+				print(scrn, end='')
+			else:
+				wprint(scrn)
+			
+			ch = self.getch()
+			print('\033[G\r\033[K', end='')  # repurpose last line
+			
+			if ch == '\003':
+				return 'x', None
+			
+			if ch == '?':
+				print("""
 first column is xxx if there exists purely-unique folders below this point,
 first column is numeric with the smallest dupe score below this point otherwise
 
@@ -778,18 +894,12 @@ fourth column is disk space consumed by the dupes in megabytes
    \033[31mred folders\033[0m contain only unique data
   \033[36mblue folders\033[0m should not appear, let me know if you see one
 
-use shift-pgup/pgdn to scroll, Q to return, ^C to exit
-""")
+use W/S to pgup/pgdn,  A/D to scroll,  Q to return,  ^C to exit
 
-		ch = None
-		scr_y = 0
-		while True:
-			scr_w, scr_h = termsize()
-			
-			ch = getch()
-			if ch in ['\003']:
-				return 'x', None
-			
+press ENTER to quit this help view
+""")
+				input()
+
 			if ch in ['u', 'q']:
 				return ch, None
 
@@ -976,10 +1086,10 @@ use shift-pgup/pgdn to scroll, Q to return, ^C to exit
 			else:
 				wprint(scrn)
 			
-			ch = getch()
+			ch = self.getch()
 			print('\033[G\r\033[K', end='')  # repurpose last line
 			
-			if ch in ['\003']:
+			if ch == '\003':
 				return 'x', None
 			
 			if ch in ['u', 'q']:
@@ -1054,8 +1164,9 @@ def main():
 	roots = []
 	for root in sys.argv[1:]:
 		if root == '-u':
-			os.remove(cache_path)
-			os.remove(sha1_path)
+			for f in [cache_path, sha1_path]:
+				try: os.remove(f)
+				except: pass
 		else:
 			roots.append(os.path.abspath(os.path.realpath(root)))
 	
@@ -1184,8 +1295,17 @@ def prof_display():
 	p.strip_dirs().sort_stats(SortKey.CUMULATIVE).print_stats()
 
 
+def loop_getch():
+	while True:
+		ch = repr(getch())
+		print(ch)
+		if ch in ['q', '\003']:
+			return
+
+
 if __name__ == '__main__':
 	#print('[{}]'.format(repr(getch())))
+	#loop_getch()
 	main()
 	#prof_collect()
 	#prof_display()
