@@ -19,6 +19,7 @@ import builtins
 import threading
 import subprocess as sp
 from datetime import datetime
+from queue import Queue
 
 
 """smf.py: file undupe by sizematching files in folders"""
@@ -105,7 +106,7 @@ elif sys.platform == 'win32':
 		TERM_ENCODING = 'utf-8'  # pypy bug: 65001 not impl
 		FS_ENCODING = 'utf-8'  # pypy bug: thinks we are mbcs
 
-	import msvcrt
+	import msvcrt  # pylint: disable=import-error
 	def getch():
 		while msvcrt.kbhit():
 			msvcrt.getch()
@@ -129,10 +130,10 @@ elif sys.platform == 'win32':
 		
 		if not ret:
 			return None
-			
-		(bufx, bufy, curx, cury, wattr,
-		 left, top, right, bottom, maxx, maxy) = \
-			struct.unpack('hhhhHhhhhhh', csbi.raw)
+		
+		# bufx, bufy, curx, cury, wattr, left, top, right, bottom, maxx, maxy
+		left, top, right, bottom = struct.unpack(
+			'hhhhHhhhhhh', csbi.raw)[5:-2]
 		
 		return [right - left + 1, bottom - top + 1]
 	
@@ -244,6 +245,7 @@ class Folder(object):
 	def __init__(self, path):
 		self.path = path
 		self.files = []
+		self.hashes = {}
 	
 	def __str__(self):
 		return '\033[36m{:6} \033[35m{:12}\033[0m {}'.format(
@@ -263,7 +265,7 @@ class DiskWalker(object):
 		thr.start()
 		
 		print('\n\033[32mentering\033[0m', top)
-		self.dev_id = os.lstat(top).st_dev
+		self.dev_id = os.lstat(fsenc(top)).st_dev
 		self.walk(top)
 		self.cur_top = None
 		print('\033[32mleaving\033[0m', top)
@@ -367,7 +369,7 @@ def gen_dupe_map(roots):
 		if nth % 10 == 0:
 			print('{} / {}'.format(nth, remains))
 		
-		mnt = folder1.path[:8]
+		mnt = folder1.path[:8]  # pylint: disable=unused-variable
 		
 		for folder2 in folders[nth:]:
 
@@ -527,7 +529,7 @@ def read_folder(top):
 		fn = fsdec(bfn)
 		
 		if stat.S_ISREG(mode):
-			ret.append([sr.st_size, sr.st_mtime, fn])
+			ret.append([sr.st_size, int(sr.st_mtime), fn])
 		else:
 			n = -3
 			if stat.S_ISLNK(mode):
@@ -540,19 +542,44 @@ def read_folder(top):
 	return ret
 
 
-def draw_panel(panel_w, statlist, other_sizes):
+def draw_panel(panel_w, stf, other_sizes, htab1, htab2):
+	htab1 = dict(htab1)
+	htab2 = dict(htab2)
 	lines = []
 	files = []
 	meta_len = 21
 	fn_len = panel_w - (meta_len + 1)
-	for sz, ts, fn in statlist:
+	for sz, ts, fn in stf:
 		meta = ' ' * meta_len
 		if sz >= 0:
 			c = '0'
 			if sz in other_sizes:
 				other_sizes.remove(sz)
 				files.append(fn)
-				c = '1;30;47'
+				c = '1;30;47'  # no-hash = white
+
+				# TODO fix structures in rewrite
+				fn2 = None
+				for fn, (hsz, _, _) in htab2.items():
+					if hsz == sz:
+						fn2 = fn
+						break
+
+				if fn in htab1 and fn2:
+					hsz, hts, hsha = htab1[fn]
+					_, _, hsha2 = htab2[fn]
+					
+					if hsz != sz or hts != ts:
+						c = '1;30;43'  # dirty hash = yellow
+					elif 'x' in [hsha, hsha2]:
+						c = '1;30;44'  # queued = blue
+					elif hsha == hsha2:
+						c = '1;37;44;48;5;28'  # match = green
+					else:
+						c = '1;37;41'  # incorrect = red
+					
+					del htab1[fn]
+					del htab2[fn2]
 			
 			sz = str(sz).rjust(11)
 			sz = '{}\033[36m{}\033[0m{}'.format(
@@ -618,7 +645,7 @@ class FSDir(object):
 			mode = sr.st_mode
 
 			if stat.S_ISREG(mode):
-				self.files.append([sr.st_size, sr.st_mtime, fn])
+				self.files.append([sr.st_size, int(sr.st_mtime), fn])
 			elif stat.S_ISLNK(mode):
 				self.files.append([-2, -2, fn])
 			elif stat.S_ISDIR(mode):
@@ -1134,17 +1161,17 @@ press ENTER to quit this help view
 			# the left and right panels listing the two folders
 			def asdf(fld):
 				try:
-					statlist = read_folder(fld.path)
+					stf = read_folder(fld.path)
 				except:
-					statlist = [[-3, -3, 'folder 404 (press U to rescan)']]
+					stf = [[-3, -3, 'folder 404 (press U to rescan)']]
 				
-				sizes = [x[0] for x in statlist]
-				return statlist, sizes
+				sizes = [x[0] for x in stf]
+				return stf, sizes
 			
-			statlist1, sizes1 = asdf(fld1)
-			statlist2, sizes2 = asdf(fld2)
-			pan1, dupefiles1 = draw_panel(panel_w, statlist1, sizes2)
-			pan2, dupefiles2 = draw_panel(panel_w, statlist2, sizes1)
+			stf1, sizes1 = asdf(fld1)
+			stf2, sizes2 = asdf(fld2)
+			pan1, dupefiles1 = draw_panel(panel_w, stf1, sizes2, fld1.hashes, fld2.hashes)
+			pan2, dupefiles2 = draw_panel(panel_w, stf2, sizes1, fld2.hashes, fld1.hashes)
 			file_rows = []
 			
 			# this is probably where the view branches will merge
@@ -1264,21 +1291,21 @@ press ENTER to quit this help view
 					dstpath = os.path.join(dstdir, dstfn)
 					
 					print(dstpath)
-					ts = os.stat(srcpath).st_mtime
+					ts = int(os.stat(srcpath).st_mtime)
 					os.utime(dstpath, (ts,ts))
 			
 			if ch == 'h':
 				# dump the folders and let core handle the rest
 				ret = []
-				for path, statlist in [
-					[fld1.path, statlist1],
-					[fld2.path, statlist2]
+				for fld, stf in [
+					[fld1, stf1],
+					[fld2, stf2]
 				]:
 					fret = []
-					for sz, ts, fn in statlist:
-						fret.append([sz, ts, os.path.join(path, fn)])
+					for sz, ts, fn in stf:
+						fret.append([sz, ts, fn])
 					
-					ret.append(fret)
+					ret.append([fld, fret])
 				
 				return ch, ret
 
@@ -1292,7 +1319,7 @@ def hashfile(fpath, fsize, prefix):
 	last_print_ts = t0
 	
 	hasher = hashlib.sha1()
-	with open(fpath, 'rb', 512*1024) as f:
+	with open(fsenc(fpath), 'rb', 512*1024) as f:
 		while True:
 			if fpos >= next_print:
 				now = time.time()
@@ -1360,6 +1387,118 @@ hit ENTER to save and continue, or press CTRL-C
 	return ok, ng, newdupes
 
 
+class Hashd(object):
+	def __init__(self, sha1_path, dupes):
+		self.sha1_path = sha1_path
+		self.dupes = dupes
+		
+		self.mtx = threading.Lock()
+		self.done = Queue()
+		self.workers = {}
+		
+		self.hashtab = {}
+		if os.path.exists(sha1_path):
+			with open(sha1_path, 'rb') as f:
+				for ln in f:
+					sha1, sz, ts, fn = ln.decode('utf-8').split(' ', 3)
+					self.hashtab[fn.rstrip()] = [int(sz), int(ts), sha1]
+		
+		by_folder = {}
+		for fpath, (sz, ts, sha1) in self.hashtab.items():
+			fdir, fname = fpath.rsplit('/', 1)
+			entry = [fname, sz, ts, sha1]
+			try:
+				by_folder[fdir].append(entry)
+			except:
+				by_folder[fdir] = [entry]
+		
+		seen = {}
+		for _, fld1, fld2 in dupes:
+			for fld in [fld1, fld2]:
+				if fld in seen:
+					continue
+				
+				seen[fld] = 1
+				try:
+					fname, sz, ts, sha1 = by_folder[fld.path]
+					fld.hashes[fname] = [sz, ts, sha1]
+				except:
+					pass
+	
+	def terminate(self):
+		for _, worker in self.workers.items():
+			worker.put(None)
+		
+		done = False
+		while not done:
+			done = True
+			time.sleep(0.1)
+			for _, worker in self.workers.items():
+				if not worker.empty():
+					done = False
+	
+	def add(self, fld, stf):
+		sz, ts, fn = stf[0]
+		bpath = fsenc(os.path.join(fld.path, fn))
+		dev_id = os.lstat(bpath).st_dev
+		if dev_id not in self.workers:
+			q = Queue()
+			self.workers[dev_id] = q
+			
+			thr = threading.Thread(target=self.worker, args=(q,))
+			thr.daemon = True
+			thr.start()
+		
+		self.workers[dev_id].put([fld, stf])
+	
+	def worker(self, q):
+		while True:
+			task = q.get()
+			if not task:
+				return
+			
+			fld, stf = task
+			
+			new_hashes = []
+			for sz, ts, fname in stf:
+				fpath = os.path.join(fld.path, fname)
+				sha = None
+				with self.mtx:
+					if fpath in self.hashtab:
+						csz, cts, csha = self.hashtab[fpath]
+						if sz == csz and ts == cts:
+							sha = csha
+				
+				if not sha:
+					sha = self.hashfile(fpath)
+					new_hashes.append([sha, sz, ts, fpath])
+				
+				fld.hashes[fname] = [sz, ts, sha]
+			
+			if new_hashes:
+				with self.mtx:
+					with open(self.sha1_path, 'ba+') as f:
+						for item in new_hashes:
+							ln = ' '.join(str(x) for x in item) + '\n'
+							f.write(ln.encode('utf-8', ENC_FILTER))
+					
+					for fpath, sz, ts, sha1 in new_hashes:
+						self.hashtab[fpath] = [sz, ts, sha1]
+	
+	def hashfile(self, fpath):
+		hasher = hashlib.sha1()
+		with open(fsenc(fpath), 'rb', 512*1024) as f:
+			while True:
+				data = f.read(512*1024)
+				if not data:
+					break
+				
+				hasher.update(data)
+		
+		b64 = base64.b64encode(hasher.digest())
+		return b64.decode('ascii').rstrip('=')
+
+
 def main():
 	if len(sys.argv) < 2:
 		print('give me folders to scan as arguments,')
@@ -1383,14 +1522,8 @@ def main():
 	view = 1
 	tui = TUI(os.path.abspath(os.path.realpath(os.getcwd())))
 	
-	hashtab = {}
-	if os.path.exists(sha1_path):
-		with open(sha1_path, 'rb') as f:
-			for ln in f:
-				sha1, sz, ts, fn = ln.decode('utf-8').split(' ', 3)
-				hashtab[fn.rstrip()] = [int(ts), sha1]
-	
 	dupes = []
+	hashd = None
 	while True:
 		if not dupes:
 			gen_time = [0., 0.]
@@ -1406,6 +1539,12 @@ def main():
 				save_dupe_map(cache_path, dupes)
 				tui.gen_time = gen_time
 		
+			if hashd:
+				hashd.terminate()
+			
+			print('mapping hashtab')
+			hashd = Hashd(sha1_path, dupes)
+			
 			tui.set_dupes(dupes)
 		
 		if not dupes:
@@ -1439,95 +1578,21 @@ def main():
 			tui.inverted_hilight = not tui.inverted_hilight
 		
 		if rv == 'h':
-			#pprint.pprint(extra)
-			hashq = []
-			d1, d2 = extra
-			for sz1, ts1, fn1 in d1:
-				hit = next((x for x in d2 if x[0] == sz1 and sz1 > 0), None)
+			hashq1 = []
+			hashq2 = []
+			(fld1, stf1), (fld2, stf2) = extra
+			for sz, ts, fn in stf1:
+				hit = next((x for x in stf2 if x[0] == sz and sz > 0), None)
 				if hit:
-					hashq.extend([[sz1, ts1, fn1], hit])
-					d2.remove(hit)
+					sz2, ts2, fn2 = hit
+					hashq1.append([sz, ts, fn])
+					hashq2.append(hit)
+					stf2.remove(hit)
+					fld1.hashes[fn] = [sz, ts, 'x']
+					fld2.hashes[fn] = [sz2, ts2, 'x']
 			
-			#pprint.pprint(hashq)
-			print('\nperforming binary comparison of the following files:')
-			for sz, ts, fn in hashq:
-				hts = datetime.utcfromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
-				print('{:12} {} {}'.format(sz, hts, fn))
-			
-			print('\n')
-			nhashed = 0
-			new_hashes = []
-			mismatches = []
-			comp_hash = None
-			for sz, ts, fn in hashq:
-				nhashed += 1
-				if sz <= 0:
-					continue
-				
-				prefix = '{}/{}  '.format(nhashed, len(hashq)-nhashed)
-				ts = int(ts)
-				
-				sha1 = None
-				if fn in hashtab:
-					tab_ts, tab_sha1 = hashtab[fn]
-					if tab_ts == ts:
-						sha1 = tab_sha1
-						speed = 0
-				
-				if not sha1:
-					sha1, time_spent = hashfile(fn, sz, prefix)
-					new_hashes.append([sha1, sz, ts, fn])
-					hashtab[fn] = [int(ts), sha1]
-					
-					speed = (sz * 1.0 / time_spent) / (1024. * 1024)
-				
-				if comp_hash == None:
-					comp_hash = sha1
-					color1 = 3
-					color2 = 3
-				else:
-					if comp_hash == sha1:
-						color1 = 2
-						color2 = 2
-					else:
-						mismatches.append(fn)
-						color1 = '7;41;1'
-						color2 = '1;1'
-					
-					comp_hash = None
-
-				print('\033[A\033[3{c1}m{hash}\033[0;3{c2}m  {fn}\033[0;36m ({spd:.2f} MiB/s)\033[0m\n'.format(
-					c1 = color1,
-					c2 = color2,
-					hash = sha1,
-					fn = fn,
-					spd = speed))
-			
-			with open(sha1_path, 'ba+') as f:
-				for item in new_hashes:
-					ln = ' '.join(str(x) for x in item) + '\n'
-					f.write(ln.encode('utf-8', ENC_FILTER))
-			
-			if mismatches:
-				print('\033[0;1;31m{} files are NOT OK:'.format(len(mismatches)))
-				for fn in mismatches:
-					print(fn)
-				
-				print('\033[0mhit ENTER twice')
-				input()
-				input()
-				print('\033[H\033[0;30;41m\033[J')
-				time.sleep(0.1)
-				print('\033[H\033[0m')
-			else:
-				print('\033[1;32meverything is OK\033[0m, hit ENTER to return')
-				input()
-			#elif new_hashes:
-			#	# probably don't care about the actual hashes,
-			#	# flash screen green to indicate success
-			#	print('\033[H\033[0;30;42m\033[J')
-			#	time.sleep(0.1)
-			#	print('\033[H\033[0m')
+			hashd.add(fld1, hashq1)
+			hashd.add(fld2, hashq2)
 		
 		if rv == 'rm':
 			nuke_path, nuke_files = extra
