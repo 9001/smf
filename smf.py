@@ -560,14 +560,14 @@ def draw_panel(panel_w, stf, other_sizes, htab1, htab2):
 
 				# TODO fix structures in rewrite
 				fn2 = None
-				for fn, (hsz, _, _) in htab2.items():
+				for hfn, (hsz, _, _) in htab2.items():
 					if hsz == sz:
-						fn2 = fn
+						fn2 = hfn
 						break
 
 				if fn in htab1 and fn2:
 					hsz, hts, hsha = htab1[fn]
-					_, _, hsha2 = htab2[fn]
+					_, _, hsha2 = htab2[fn2]
 					
 					if hsz != sz or hts != ts:
 						c = '1;30;43'  # dirty hash = yellow
@@ -1589,7 +1589,7 @@ def main():
 					hashq2.append(hit)
 					stf2.remove(hit)
 					fld1.hashes[fn] = [sz, ts, 'x']
-					fld2.hashes[fn] = [sz2, ts2, 'x']
+					fld2.hashes[fn2] = [sz2, ts2, 'x']
 			
 			hashd.add(fld1, hashq1)
 			hashd.add(fld2, hashq2)
