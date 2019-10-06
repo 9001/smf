@@ -29,6 +29,10 @@ __license__   = "MIT"
 __copyright__ = 2019
 
 
+# search for "option:" to see tweakable things below
+# (these will become proper options/arguments eventually)
+
+
 FS_ENCODING = sys.getfilesystemencoding()
 
 ENC_FILTER = 'surrogateescape'
@@ -252,6 +256,8 @@ class DiskWalker(object):
 		self.folders = []
 		self.errors = []
 		
+		self.re_usenet = r'\.(r[0-9]{2}|rar)$'
+		
 		thr = threading.Thread(target=self.logger)
 		thr.daemon = True
 		thr.start()
@@ -289,6 +295,8 @@ class DiskWalker(object):
 			bpath = os.path.join(btop, bfn)
 			try:
 				sr = os.lstat(bpath)
+			except KeyboardInterrupt:
+				raise
 			except:
 				self.oof('\033[1;31maccess denied:\033[0m', fsdec(bpath))
 				continue
@@ -309,12 +317,21 @@ class DiskWalker(object):
 				except:
 					self.oof('\033[1;31maccess denied:\033[0m', fsdec(bpath))
 
-			elif stat.S_ISREG(mode) and sr.st_size > 0:
-				folder.files.append(sr.st_size)
+			elif not stat.S_ISREG(mode):
+				continue
+			
+			if sr.st_size <= 0:
+				continue
+			
+			# TODO filter usenet stuff
+			
+			folder.files.append(sr.st_size)
 
+		sz = sum(folder.files)
+		
 		if folder.files \
-		and sum(folder.files) > 1*1024*1024 \
-		and len(folder.files) > 2:
+		and sz > 1*1024*1024 \
+		and (len(folder.files) > 2 or sz >= 512*1024*1024):
 			self.folders.append(folder)
 
 
@@ -350,12 +367,14 @@ def gen_dupe_map(roots):
 		if nth % 10 == 0:
 			print('{} / {}'.format(nth, remains))
 		
-		# fgsfds
-		#mnt = folder1.path[:8]
+		mnt = folder1.path[:8]
 		
 		for folder2 in folders[nth:]:
-			#if folder2.path.startswith(mnt):
-			#	continue
+
+			# option: uncomment to only compare between different drives
+			# (first 8 letters of each absolute path must be different)
+			#if folder2.path.startswith(mnt): continue
+			
 			
 			# hits = each file size that matched,
 			# rhs = the remaining files in folder2 to check
@@ -370,20 +389,23 @@ def gen_dupe_map(roots):
 			score = (len(hits) * 2.0) / (
 				len(folder1.files) + len(folder2.files))
 			
-			# must be 20% or more files with identical size
-			if score < 0.2:
-				continue
-			
-			# total disk consumption must be <= 30% different
-			a = sum(folder1.files)
-			b = sum(folder2.files)
-			if min(a,b) * 1.0 / max(a,b) < 0.7:
-				continue
-			
-			# matched files must amount to >= 20% of bytes
-			if sum(hits) < a * 0.2 \
-			and sum(hits) < b * 0.2:
-				continue
+			# sufficiently large hits skip all the checks
+			if sum(hits) < 600 * 1024 * 1024:
+				
+				# must be 20% or more files with identical size
+				if score < 0.2:
+					continue
+				
+				# total disk consumption must be <= 30% different
+				a = sum(folder1.files)
+				b = sum(folder2.files)
+				if min(a,b) * 1.0 / max(a,b) < 0.7:
+					continue
+				
+				# matched files must amount to >= 20% of bytes
+				if sum(hits) < a * 0.2 \
+				and sum(hits) < b * 0.2:
+					continue
 			
 			dupes.append([score, folder1, folder2])
 
@@ -519,7 +541,8 @@ def read_folder(top):
 
 
 def draw_panel(panel_w, statlist, other_sizes):
-	ret = []
+	lines = []
+	files = []
 	meta_len = 21
 	fn_len = panel_w - (meta_len + 1)
 	for sz, ts, fn in statlist:
@@ -528,6 +551,7 @@ def draw_panel(panel_w, statlist, other_sizes):
 			c = '0'
 			if sz in other_sizes:
 				other_sizes.remove(sz)
+				files.append(fn)
 				c = '1;30;47'
 			
 			sz = str(sz).rjust(11)
@@ -549,10 +573,10 @@ def draw_panel(panel_w, statlist, other_sizes):
 			# unhandled
 			c = '1;31'
 		
-		ret.append('{} \033[{}m{}'.format(
+		lines.append('{} \033[{}m{}'.format(
 			meta, c, fn[:fn_len].ljust(fn_len)))
 
-	return ret
+	return lines, files
 
 
 class FSDir(object):
@@ -606,31 +630,42 @@ class FSDir(object):
 				or (path.startswith(dest) and extra_levels > 0):
 					subdir.build_until(dest, extra_levels)
 	
-	def gen(self, ret = [], lv=0):
+	def gen(self, ret, cmap, lv=0):
 		scores = ''.join(['\033[{}m{:>3}%\033[0m '.format(x, y) for x, y in [
 			colorize_score(self.smin),
 			colorize_score("xxx" if self.smax < -7 else self.smax),
 			colorize_score("xxx" if self.scur < 0 else self.scur)]])
 
-		if self.smin == 1: cdir = '7;48;5;28;1' # purely dupes; green
+		if self.smin == 1: cdir = 2 # purely dupes; green
 		elif self.smax < -7: cdir = 1  # purely unique; red
 		elif self.smin <= 0.01: cdir = 5  # contains unique folders; purple
 		elif self.smin > 0: cdir = 3  # purely folders with dupes; yellow
 		else: cdir = 6  # wait what did i forget
+		
+		sz_v = self.dupesize / (1024*1024)
+		if sz_v < 30:
+			sz_c = '1;30'
+		elif sz_v < 200:
+			sz_c = '36'
+		elif sz_v < 1000:
+			sz_c = '1;33'
+		else:
+			sz_c = '1;37;44'
 		
 		# not all folders shown are dupes so don't necessarily have a fld,
 		# so using self.path since ram is cheap anyways
 		ret.append([
 			self.path,
 			scores,
-			'{size:>5} {pad}\033[0;3{cdir}m{path}\033[0m'.format(
-				size = int(self.dupesize / (1024*1024)),
+			'\033[{sz_c}m{sz_v:>5}\033[0m {pad}\033[0;3{cdir}m{path}\033[0m'.format(
+				sz_c = sz_c,
+				sz_v = int(sz_v),
 				pad = '{}\033[1;3{}m|'.format(' ' * (lv * 2 - 1), lv%8) if lv else '',
-				cdir = cdir,
+				cdir = cmap[cdir],
 				path = self.path)])
 		
 		for _, p in sorted(self.dirs.items()):
-			p.gen(ret, lv + 1)
+			p.gen(ret, cmap, lv + 1)
 		
 		if self.dirs and not ret[:1]:
 			ret.append(None)
@@ -695,6 +730,7 @@ class TUI(object):
 		self.set_dupes(None)
 		
 		self.getch = GetchInterp().g
+		self.inverted_hilight = False
 
 	def set_dupes(self, dupes):
 		self.fcmp_idx = 0
@@ -759,11 +795,19 @@ class TUI(object):
 			# noise filter: remove folders with no dupes at all
 			def foo2(node, parent_has_dupes=False):
 				drop = []
+				was_dupe = False
 				for k, v in node.dirs.items():
-					if v.smax <= 0:
-						drop.append(k)
+					if v.smax > 0:
+						was_dupe = True
+					else:
+						# leave one non-dupe between dupes
+						# to ease glancing for unique folders
+						if was_dupe:
+							was_dupe = False
+						else:
+							drop.append(k)
 				
-				# leave one leaf to indicate unique data within
+				# and leave the first non-dupe in general too
 				i_have_dupes = node.scur > 0 or node.smax > 0
 				if parent_has_dupes or i_have_dupes:
 					drop = drop[1:]
@@ -774,6 +818,7 @@ class TUI(object):
 				for _, v in node.dirs.items():
 					foo2(v, i_have_dupes)
 			
+			# option: uncomment to show less non-dupe folders
 			foo2(self.fs)
 			
 			if errors:
@@ -784,8 +829,27 @@ class TUI(object):
 				print('\nis this ok? press ENTER to continue or CTRL-C\n')
 				input()
 		
+		if not self.inverted_hilight:
+			cmap = {
+				1: 1,
+				2: '7;48;5;28;1',
+				3: 3,
+				4: 4,
+				5: 5,
+				6: 6
+			}
+		else:
+			cmap = {
+				1: '7;48;5;124;1',
+				2: '0;1',
+				3: '7;48;5;94;1',
+				4: '7;48;5;26;1',
+				5: '7;48;5;92;1',
+				6: '7;48;5;68;1'
+			}
+
 		tree = []
-		self.fs.gen(tree)
+		self.fs.gen(tree, cmap)
 		
 		scr_y = 0
 		dir_ptr = 0
@@ -797,7 +861,7 @@ class TUI(object):
 				break
 
 		ch = None
-		header = '\033[0;1;40m  min% max% dir%   size  //  ←dupe→  ↑screen↓  Q  \033[0m'
+		header = '\033[0;1;40m  min% max% dir%   size  //  ↑dupe↓  ←screen→  Q  \033[0m'
 		
 		while True:
 			scr_w, scr_h = termsize()
@@ -932,7 +996,7 @@ press ENTER to quit this help view
 				self.cur_path = self.dupes[0][1].path
 				return ch, None
 			
-			if ch in ['r', 'u']:
+			if ch in ['r', 'u', 'v']:
 				return ch, None
 
 	def foldercomp(self):
@@ -1000,11 +1064,22 @@ press ENTER to quit this help view
 			
 			# start with just the header
 			csc = colorize_score(score)
-			scrn = '\033[H\033[0;1;40m{idupe} / {ndupes}  \033[{sc_c}m{sc_v}%\033[0;40m  ←dupe→  ↑screen↓  E/Q  \033[0;36;40m{gt1:.2f}s + {gt2:.2f}s\n\033[0m'.format(
+			
+			sz_v = int(get_dupe_size(fld1, fld2) / (1024.*1024))
+			if sz_v < 30:
+				sz_c = '1;30'
+			elif sz_v < 200:
+				sz_c = '33'
+			else:
+				sz_c = '1;37;44'
+			
+			scrn = '\033[H\033[0;1;40m{idupe} / {ndupes}  \033[{sc_c}m{sc_v}%\033[0;40m  \033[{sz_c}m{sz_v}\033[0;40mMB  ←dupe→  ↑screen↓  E/Q  \033[0;36;40m{gt1:.2f}s + {gt2:.2f}s\n\033[0m'.format(
 				idupe = self.fcmp_idx + 1,
 				ndupes = len(self.dupes),
 				sc_c = csc[0],
 				sc_v = csc[1],
+				sz_c = sz_c,
+				sz_v = sz_v,
 				gt1 = self.gen_time[0],
 				gt2 = self.gen_time[1]
 			)
@@ -1068,8 +1143,8 @@ press ENTER to quit this help view
 			
 			statlist1, sizes1 = asdf(fld1)
 			statlist2, sizes2 = asdf(fld2)
-			pan1 = draw_panel(panel_w, statlist1, sizes2)
-			pan2 = draw_panel(panel_w, statlist2, sizes1)
+			pan1, dupefiles1 = draw_panel(panel_w, statlist1, sizes2)
+			pan2, dupefiles2 = draw_panel(panel_w, statlist2, sizes1)
 			file_rows = []
 			
 			# this is probably where the view branches will merge
@@ -1131,9 +1206,67 @@ press ENTER to quit this help view
 			if ch == '\003':
 				return 'x', None
 			
-			if ch in ['r', 'u', 'q']:
+			if ch in ['r', 'u', 'v', 'q']:
 				return ch, None
 
+			if ch == 'k':
+				print('\033[2A\033[J\033[1;37;41m\033[Jchoose folder to remove dupes from:\n\033[0m\033[J\033[1;37;44m J \033[0m {}\n\033[1;37;44m L \033[0m {}'.format(
+					fld1.path, fld2.path), end='')
+				
+				ch = self.getch()
+				if ch == 'j':
+					n = 1
+				elif ch == 'l':
+					n = -1
+				else:
+					print('\n\n\033[1;37;44m abort \033[0m')
+					time.sleep(0.5)
+					continue
+				
+				nuke_path, keep_path = [fld1.path, fld2.path][::n]
+				nuke_files, keep_files = [dupefiles1, dupefiles2][::n]
+				nuke_side, keep_side = ['LEFT', 'RIGHT'][::n]
+				
+				print('\033[3A\n\033[1;37;41m\033[JDELETE {}:\033[0;1m {} \033[0m\n\033[J\033[1;37;44m K \033[0m Delete files\n\033[1;37;44m L \033[0m replace with symlinks to files in {} '.format(
+					nuke_side, nuke_path, keep_side), end='')
+				
+				ch = self.getch()
+				print('\n')
+				
+				if ch == 'k':
+					return 'rm', [nuke_path, nuke_files]
+				elif ch == 'l':
+					return 'ln', [keep_path, keep_files, nuke_path, nuke_files]
+				
+				print('\n\n\033[1;37;44m abort \033[0m')
+				time.sleep(0.5)
+				continue
+			
+			if ch == 'm':
+				print('\033[2A\033[J\033[1;37;41m\033[Jchoose folder to write last-modified to:\n\033[0m\033[J\033[1;37;44m J \033[0m {}\n\033[1;37;44m L \033[0m {}'.format(
+					fld1.path, fld2.path), end='')
+				
+				ch = self.getch()
+				if ch == 'j':
+					n = 1
+				elif ch == 'l':
+					n = -1
+				else:
+					print('\n\n\033[1;37;44m abort \033[0m')
+					time.sleep(0.5)
+					continue
+				
+				dstdir, srcdir = [fld1.path, fld2.path][::n]
+				dstfiles, srcfiles = [dupefiles1, dupefiles2][::n]
+				
+				for srcfn, dstfn in zip(srcfiles, dstfiles):
+					srcpath = os.path.join(srcdir, srcfn)
+					dstpath = os.path.join(dstdir, dstfn)
+					
+					print(dstpath)
+					ts = os.stat(srcpath).st_mtime
+					os.utime(dstpath, (ts,ts))
+			
 			if ch == 'h':
 				# dump the folders and let core handle the rest
 				ret = []
@@ -1150,11 +1283,11 @@ press ENTER to quit this help view
 				return ch, ret
 
 
-def hashfile(fpath, fsize):
+def hashfile(fpath, fsize, prefix):
 	t0 = time.time()
 	fpos = 0
 	next_print = 0
-	print_interval = 1024*1024*32
+	print_interval = 1024*1024*16
 	last_print_pos = 0
 	last_print_ts = t0
 	
@@ -1175,8 +1308,9 @@ def hashfile(fpath, fsize):
 						(now - last_print_ts)) /
 						(1024. * 1024))
 				
-				print('\033[A{:6.2f}% @ {:8.2f} MiB/s  {}'.format(
-					perc, speed, fpath))
+				next_print += print_interval
+				print('\033[A{}{:6.2f}% @ {:8.2f} MiB/s  {}'.format(
+					prefix, perc, speed, fpath))
 			
 			data = f.read(512*1024)
 			if not data:
@@ -1284,6 +1418,8 @@ def main():
 		else:
 			rv, extra = tui.tree()
 		
+		need_quickrefresh = False
+		
 		if rv == 'q':
 			view += 1
 			if view > 2:
@@ -1293,20 +1429,21 @@ def main():
 			return
 		
 		if rv == 'r':
-			ok, ng, dupes = remove_deleted_folders(dupes)
-			save_dupe_map(cache_path, dupes)
-			tui.set_dupes(dupes)
+			need_quickrefresh = True
 		
 		if rv == 'u':
 			dupes = None
 			os.remove(cache_path)
+		
+		if rv == 'v':
+			tui.inverted_hilight = not tui.inverted_hilight
 		
 		if rv == 'h':
 			#pprint.pprint(extra)
 			hashq = []
 			d1, d2 = extra
 			for sz1, ts1, fn1 in d1:
-				hit = next((x for x in d2 if x[0] == sz1), None)
+				hit = next((x for x in d2 if x[0] == sz1 and sz1 > 0), None)
 				if hit:
 					hashq.extend([[sz1, ts1, fn1], hit])
 					d2.remove(hit)
@@ -1318,14 +1455,17 @@ def main():
 				print('{:12} {} {}'.format(sz, hts, fn))
 			
 			print('\n')
+			nhashed = 0
 			new_hashes = []
 			mismatches = []
 			comp_hash = None
 			for sz, ts, fn in hashq:
-				ts = int(ts)
-				
+				nhashed += 1
 				if sz <= 0:
 					continue
+				
+				prefix = '{}/{}  '.format(nhashed, len(hashq)-nhashed)
+				ts = int(ts)
 				
 				sha1 = None
 				if fn in hashtab:
@@ -1335,7 +1475,7 @@ def main():
 						speed = 0
 				
 				if not sha1:
-					sha1, time_spent = hashfile(fn, sz)
+					sha1, time_spent = hashfile(fn, sz, prefix)
 					new_hashes.append([sha1, sz, ts, fn])
 					hashtab[fn] = [int(ts), sha1]
 					
@@ -1369,15 +1509,77 @@ def main():
 					f.write(ln.encode('utf-8', ENC_FILTER))
 			
 			if mismatches:
-				print('{} files are NOT OK:'.format(len(mismatches)))
+				print('\033[0;1;31m{} files are NOT OK:'.format(len(mismatches)))
 				for fn in mismatches:
 					print(fn)
 				
-				print('hit ENTER')
+				print('\033[0mhit ENTER twice')
+				input()
+				input()
+				print('\033[H\033[0;30;41m\033[J')
+				time.sleep(0.1)
+				print('\033[H\033[0m')
 			else:
-				print('everything is OK, hit ENTER to return')
+				print('\033[1;32meverything is OK\033[0m, hit ENTER to return')
+				input()
+			#elif new_hashes:
+			#	# probably don't care about the actual hashes,
+			#	# flash screen green to indicate success
+			#	print('\033[H\033[0;30;42m\033[J')
+			#	time.sleep(0.1)
+			#	print('\033[H\033[0m')
+		
+		if rv == 'rm':
+			nuke_path, nuke_files = extra
+			actions = []
+			for fn in nuke_files:
+				actions.append(os.path.join(nuke_path, fn))
+				print('\033[1;37;41mDEL\033[0m {}'.format(actions[-1]))
 			
+			print('press ENTER to confirm')
 			input()
+			
+			for path in actions:
+				print('rm', path)
+				os.remove(path)
+			
+			try:
+				os.rmdir(nuke_path)
+				print('\033[32mfolder deleted too')
+			except:
+				print('\033[31mcould NOT delete folder')
+			
+			print('\033[0mdone; press ENTER to return')
+			#need_quickrefresh = True
+			#input()
+
+		if rv == 'ln':
+			keep_path, keep_files, \
+			nuke_path, nuke_files = extra
+			
+			actions = []
+			for keep_fn, nuke_fn in zip(keep_files, nuke_files):
+				keep_abs = os.path.join(keep_path, keep_fn)
+				nuke_abs = os.path.join(nuke_path, nuke_fn)
+				actions.append([keep_abs, nuke_abs])
+				print('ln \033[1;37;44m{}\033[0;1;33m -> \033[1;37;41m{}\033[0m'.format(*actions[-1]))
+			
+			print('press ENTER to confirm')
+			input()
+			
+			for keep, nuke in actions:
+				print('rm', nuke)
+				os.remove(nuke)
+				os.symlink(keep, nuke)
+			
+			print('done; press ENTER to return')
+			#need_quickrefresh = True
+			#input()
+		
+		if need_quickrefresh:
+			ok, ng, dupes = remove_deleted_folders(dupes)
+			save_dupe_map(cache_path, dupes)
+			tui.set_dupes(dupes)
 
 
 def prof_collect():
@@ -1406,3 +1608,11 @@ if __name__ == '__main__':
 	main()
 	#prof_collect()
 	#prof_display()
+
+
+"""
+TODO
+persist y when flipping back to tree
+re_usenet
+if not same fs, multithread hashing
+"""
