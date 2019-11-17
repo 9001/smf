@@ -9,6 +9,7 @@ import stat
 import time
 import math
 import gzip
+import bz2
 import struct
 import pprint
 import base64
@@ -254,11 +255,15 @@ class Folder(object):
 
 class DiskWalker(object):
 	def __init__(self, top):
+		if ':' in top:
+			self.from_rfl(top)
+			return
+		
 		self.cur_top = top
 		self.folders = []
 		self.errors = []
 		
-		self.re_usenet = r'\.(r[0-9]{2}|rar)$'
+		self.re_usenet = r'\.(r[0-9]{2}|part[0-9]+\.rar)$'
 		
 		thr = threading.Thread(target=self.logger)
 		thr.daemon = True
@@ -269,6 +274,45 @@ class DiskWalker(object):
 		self.walk(top)
 		self.cur_top = None
 		print('\033[32mleaving\033[0m', top)
+
+	def from_rfl(self, top):
+		top, rfl = top.split(':', 1)
+		print('loading [{}] from rfl [{}]'.format(top, rfl))
+		# ./hd/t5/revo.dd.tar.gz //  [-rwxr-xr-x/20656344319/ed:ed] @1247779616
+		ptn = re.compile('(.*) // (.*) \[([dlrwx-]{10})/([0-9]+)/([^]]+)\] @([0-9]+)$')
+		folders = {}
+		with bz2.open(rfl, 'rb') as f:
+			for ln in f:
+				m = ptn.match(ln.decode('utf-8', 'replace').strip())
+				if not m:
+					continue
+				
+				try:
+					fn, lnk, modes, sz, owner, ts = m.groups()
+					fdir, fn = fn.rsplit('/', 1)
+					sz = int(sz)
+				except Exception as ex:
+					raise Exception('could not parse {}\n{}\n'.format(
+						ln, str(ex)))
+				
+				if sz <= 0:
+					continue
+				
+				try:
+					folders[fdir].append(sz)
+				except:
+					folders[fdir] = [sz]
+
+		self.errors = []
+		self.folders = []
+		for fpath, fsizes in folders.items():
+			folder = Folder(fpath)
+			folder.files = fsizes
+			sz = sum(fsizes)
+			
+			if sz > 1*1024*1024 \
+			and (len(fsizes) > 2 or sz >= 512*1024*1024):
+				self.folders.append(folder)
 
 	def oof(self, *msg):
 		msg = ' '.join(str(x) for x in msg)
@@ -289,12 +333,18 @@ class DiskWalker(object):
 			print('\033[36mreading\033[0m', self.cur_top)
 	
 	def walk(self, top):
+		# option: exclude directory
+		#if '/zq1/hd/bismuth' in top: return
+
 		self.cur_top = top
 		dev_id = self.dev_id
 		folder = Folder(top)
 		btop = fsenc(top)
 		for bfn in sorted(os.listdir(btop)):
 			bpath = os.path.join(btop, bfn)
+			if b'\n' in bpath:
+				continue
+			
 			try:
 				sr = os.lstat(bpath)
 			except KeyboardInterrupt:
@@ -325,8 +375,6 @@ class DiskWalker(object):
 			if sr.st_size <= 0:
 				continue
 			
-			# TODO filter usenet stuff
-			
 			folder.files.append(sr.st_size)
 
 		sz = sum(folder.files)
@@ -343,10 +391,32 @@ def gen_dupe_map(roots):
 	t0 = time.time()
 	folders = []
 	errors = []
-	for root in roots:
-		dw = DiskWalker(root)
-		folders.extend(dw.folders)
-		errors.extend(dw.errors)
+	
+	snap_path = os.path.join(tempfile.gettempdir(), 'smf.snap')
+	if os.path.isfile(snap_path):
+		with gzip.open(snap_path, 'rb') as f:
+			while True:
+				ln = f.readline()[:-1].decode('utf-8', ENC_FILTER)
+				if ln == 'eof':
+					break
+				
+				if not ln.startswith('p '):
+					raise Exception('p expected, got ' + ln)
+				
+				ln2 = f.readline()[:-1].decode('utf-8')
+				if not ln2.startswith('f '):
+					raise Exception('f expected, got ' + ln2)
+					
+				folder = Folder(ln[2:])
+				for sz in ln2[2:].split(' '):
+					folder.files.append(int(sz))
+				
+				folders.append(folder)
+	else:
+		for root in roots:
+			dw = DiskWalker(root)
+			folders.extend(dw.folders)
+			errors.extend(dw.errors)
 	
 	if errors:
 		print('{} errors occurred:'.format(len(errors)))
@@ -355,7 +425,18 @@ def gen_dupe_map(roots):
 		
 		print('these will be repeated after the dupemap generation finishes')
 	
-	print("\ngenerating dupemap (hope you're using pypy w)")
+	if not os.path.isfile(snap_path):
+		print("\ndumping snapshot to", snap_path)
+		with gzip.open(snap_path, 'wb') as f:
+			for fld in folders:
+				txt = 'p {}\nf {}\n'.format(fld.path,
+					' '.join(str(x) for x in fld.files))
+				
+				f.write(txt.encode('utf-8', ENC_FILTER))
+			
+			f.write(b'eof\n')
+	
+	print("generating dupemap (hope you're using pypy w)")
 
 	# compare each unique permutation of [Folder,Folder]
 	t1 = time.time()
@@ -375,7 +456,7 @@ def gen_dupe_map(roots):
 
 			# option: uncomment to only compare between different drives
 			# (first 8 letters of each absolute path must be different)
-			#if folder2.path.startswith(mnt): continue
+			if folder2.path.startswith(mnt): continue
 			
 			
 			# hits = each file size that matched,
@@ -555,8 +636,8 @@ def draw_panel(panel_w, stf, other_sizes, htab1, htab2):
 			c = '0'
 			if sz in other_sizes:
 				other_sizes.remove(sz)
-				files.append(fn)
 				c = '1;30;47'  # no-hash = white
+				bin_eq = True
 
 				# TODO fix structures in rewrite
 				fn2 = None
@@ -571,15 +652,21 @@ def draw_panel(panel_w, stf, other_sizes, htab1, htab2):
 					
 					if hsz != sz or hts != ts:
 						c = '1;30;43'  # dirty hash = yellow
+						bin_eq = False
 					elif 'x' in [hsha, hsha2]:
 						c = '1;30;44'  # queued = blue
+						bin_eq = False
 					elif hsha == hsha2:
 						c = '1;37;44;48;5;28'  # match = green
+						bin_eq = True
 					else:
 						c = '1;37;41'  # incorrect = red
+						bin_eq = False
 					
 					del htab1[fn]
 					del htab2[fn2]
+
+				files.append([bin_eq, fn])
 			
 			sz = str(sz).rjust(11)
 			sz = '{}\033[36m{}\033[0m{}'.format(
@@ -1253,6 +1340,7 @@ press ENTER to quit this help view
 				nuke_path, keep_path = [fld1.path, fld2.path][::n]
 				nuke_files, keep_files = [dupefiles1, dupefiles2][::n]
 				nuke_side, keep_side = ['LEFT', 'RIGHT'][::n]
+				nuke_fld, keep_fld = [fld1, fld2][::n]
 				
 				print('\033[3A\n\033[1;37;41m\033[JDELETE {}:\033[0;1m {} \033[0m\n\033[J\033[1;37;44m K \033[0m Delete files\n\033[1;37;44m L \033[0m replace with symlinks to files in {} '.format(
 					nuke_side, nuke_path, keep_side), end='')
@@ -1263,7 +1351,24 @@ press ENTER to quit this help view
 				if ch == 'k':
 					return 'rm', [nuke_path, nuke_files]
 				elif ch == 'l':
-					return 'ln', [keep_path, keep_files, nuke_path, nuke_files]
+					# main needs *_files ordered, another todo for the rewrite
+					# fld.hashes[fname] = [sz, ts, sha1]
+					lhs = []
+					rhs = []
+					for got_hash, fn in nuke_files:
+						try:
+							_, _, expect = nuke_fld.hashes[fn]
+						except:
+							continue
+						
+						for fn2, (sz, ts, sha1) in keep_fld.hashes.items():
+							if sha1 == expect:
+								lhs.append([True, fn])
+								rhs.append([True, fn2])
+								break
+					
+					#return 'ln', [keep_path, keep_files, nuke_path, nuke_files]
+					return 'ln', [keep_path, rhs, nuke_path, lhs]
 				
 				print('\n\n\033[1;37;44m abort \033[0m')
 				time.sleep(0.5)
@@ -1286,13 +1391,55 @@ press ENTER to quit this help view
 				dstdir, srcdir = [fld1.path, fld2.path][::n]
 				dstfiles, srcfiles = [dupefiles1, dupefiles2][::n]
 				
-				for srcfn, dstfn in zip(srcfiles, dstfiles):
+				for (srceq, srcfn), (dsteq, dstfn) in zip(srcfiles, dstfiles):
+					if not srceq or not dsteq:
+						continue
+					
 					srcpath = os.path.join(srcdir, srcfn)
 					dstpath = os.path.join(dstdir, dstfn)
 					
 					print(dstpath)
 					ts = int(os.stat(srcpath).st_mtime)
 					os.utime(dstpath, (ts,ts))
+						
+			if ch == 'n':
+				print('\033[2A\033[J\033[1;37;41m\033[Jchoose folder to WRITE FILENAMES to:\n\033[0m\033[J\033[1;37;44m J \033[0m {}\n\033[1;37;44m L \033[0m {}'.format(
+					fld1.path, fld2.path), end='')
+				
+				ch = self.getch()
+				if ch == 'j':
+					n = 1
+				elif ch == 'l':
+					n = -1
+				else:
+					print('\n\n\033[1;37;44m abort \033[0m')
+					time.sleep(0.5)
+					continue
+				
+				dstdir, srcdir = [fld1.path, fld2.path][::n]
+				dstfiles, srcfiles = [dupefiles1, dupefiles2][::n]
+				
+				print('\n')
+				actions = []
+				for (srceq, srcfn), (dsteq, dstfn) in zip(srcfiles, dstfiles):
+					if not srceq or not dsteq:
+						continue
+					
+					srcpath = os.path.join(dstdir, dstfn)
+					dstpath = os.path.join(dstdir, srcfn)
+					actions.append([srcpath, dstpath])
+					
+					print('old {}\nnew {}\n'.format(*actions[-1]))
+				
+				print('press ENTER to confirm')
+				input()
+				
+				for p1, p2 in actions:
+					print('mv', p1)
+					if os.path.exists(p2):
+						raise Exception('destination exists: {}'.format(p2))
+					
+					os.rename(p1, p2)
 			
 			if ch == 'h':
 				# dump the folders and let core handle the rest
@@ -1597,7 +1744,10 @@ def main():
 		if rv == 'rm':
 			nuke_path, nuke_files = extra
 			actions = []
-			for fn in nuke_files:
+			for bin_eq, fn in nuke_files:
+				if not bin_eq:
+					continue
+				
 				actions.append(os.path.join(nuke_path, fn))
 				print('\033[1;37;41mDEL\033[0m {}'.format(actions[-1]))
 			
@@ -1623,7 +1773,13 @@ def main():
 			nuke_path, nuke_files = extra
 			
 			actions = []
-			for keep_fn, nuke_fn in zip(keep_files, nuke_files):
+			for xa, xb in zip(keep_files, nuke_files):
+				keep_bineq, keep_fn = xa
+				nuke_bineq, nuke_fn = xb
+				
+				if not keep_bineq or not nuke_bineq:
+					continue
+				
 				keep_abs = os.path.join(keep_path, keep_fn)
 				nuke_abs = os.path.join(nuke_path, nuke_fn)
 				actions.append([keep_abs, nuke_abs])
@@ -1679,5 +1835,6 @@ if __name__ == '__main__':
 TODO
 persist y when flipping back to tree
 re_usenet
-if not same fs, multithread hashing
+match by hash first then filesize
+show hash mismatch count in statusbar
 """
