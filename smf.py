@@ -289,6 +289,7 @@ class DiskWalker(object):
 				
 				try:
 					fn, lnk, modes, sz, owner, ts = m.groups()
+					fn = os.path.abspath(os.path.join(top, fn))
 					fdir, fn = fn.rsplit('/', 1)
 					sz = int(sz)
 				except Exception as ex:
