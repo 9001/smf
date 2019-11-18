@@ -386,14 +386,13 @@ class DiskWalker(object):
 			self.folders.append(folder)
 
 
-def gen_dupe_map(roots):
+def gen_dupe_map(roots, snap_path):
 	print("\nscanning disk...")
 	
 	t0 = time.time()
 	folders = []
 	errors = []
 	
-	snap_path = os.path.join(tempfile.gettempdir(), 'smf.snap')
 	if os.path.isfile(snap_path):
 		with gzip.open(snap_path, 'rb') as f:
 			while True:
@@ -1655,13 +1654,15 @@ def main():
 	
 	cache_path = os.path.join(tempfile.gettempdir(), 'smf.cache')
 	sha1_path = os.path.join(tempfile.gettempdir(), 'smf.sha1')
+	snap_path = os.path.join(tempfile.gettempdir(), 'smf.snap')
 	print('using', cache_path)
 	print('using', sha1_path)
+	print('using', snap_path)
 
 	roots = []
 	for root in sys.argv[1:]:
 		if root == '-u':
-			for f in [cache_path, sha1_path]:
+			for f in [cache_path, sha1_path, snap_path]:
 				try: os.remove(f)
 				except: pass
 		else:
@@ -1682,7 +1683,7 @@ def main():
 				if len(dupes) != len(xdupes):
 					save_dupe_map(cache_path, dupes)
 			else:
-				dupes, gen_time = gen_dupe_map(roots)
+				dupes, gen_time = gen_dupe_map(roots, snap_path)
 				print('saving cache')
 				save_dupe_map(cache_path, dupes)
 				tui.gen_time = gen_time
