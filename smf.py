@@ -1211,8 +1211,13 @@ action-keys:
 W/S = scroll
 A/D = switch folders
   Q = toggle tree-view
+  H = initiate file hashing to compare file contents;
+       tap spacebar or switch folders (A/D) to refresh
+       (press H in multiple folders to queue them)
   E = open folders in ranger (linux) or explorer (windows)
+  V = invert diff hilight colors
   R = redraw screen
+  U = discard cache (full reindex)
  ^C = exit
 
 keys which have follow-up questions:
