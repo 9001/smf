@@ -510,7 +510,7 @@ def gen_dupe_map(roots, snap_path):
 
 			# option: uncomment to only compare between different drives
 			# (first 8 letters of each absolute path must be different)
-			if folder2.path.startswith(mnt): continue
+			#if folder2.path.startswith(mnt): continue
 			
 			
 			# hits = each file size that matched,
@@ -1035,7 +1035,7 @@ class TUI(object):
 				break
 
 		ch = None
-		header = '\033[0;1;40m  min% max% dir%   size  //  ↑dupe↓  ←screen→  Q  \033[0m'
+		header = '\033[0;1;40m  min% max% dir%   size  //  ↑dupe↓  ←screen→  ?/Q  \033[0m'
 		
 		while True:
 			scr_w, scr_h = termsize()
@@ -1204,7 +1204,26 @@ press ENTER to quit this help view
 				self.fcmp_idx += 1
 				if self.fcmp_idx >= len(self.dupes):
 					self.fcmp_idx = 0
-			
+
+			if ch == '?':
+				print("""
+action-keys:
+W/S = scroll
+A/D = switch folders
+  Q = toggle tree-view
+  E = open folders in ranger (linux) or explorer (windows)
+  R = redraw screen
+ ^C = exit
+
+keys which have follow-up questions:
+  K = delete dupes (from Left or Right side)
+  M = transfer last-modified timestamps
+  N = transfer filenames
+
+press ENTER to quit this help view
+""")
+				input()
+
 			score, fld1, fld2 = self.dupes[self.fcmp_idx]
 			self.cur_path = fld1.path
 			
@@ -1247,7 +1266,7 @@ press ENTER to quit this help view
 			else:
 				sz_c = '1;37;44'
 			
-			scrn = '\033[H\033[0;1;40m{idupe} / {ndupes}  \033[{sc_c}m{sc_v}%\033[0;40m  \033[{sz_c}m{sz_v}\033[0;40mMB  ←dupe→  ↑screen↓  E/Q  \033[0;36;40m{gt1:.2f}s + {gt2:.2f}s\n\033[0m'.format(
+			scrn = '\033[H\033[0;1;40m{idupe} / {ndupes}  \033[{sc_c}m{sc_v}%\033[0;40m  \033[{sz_c}m{sz_v}\033[0;40mMB  ←dupe→  ↑screen↓  ?/E/Q  \033[0;36;40m{gt1:.2f}s + {gt2:.2f}s\n\033[0m'.format(
 				idupe = self.fcmp_idx + 1,
 				ndupes = len(self.dupes),
 				sc_c = csc[0],
