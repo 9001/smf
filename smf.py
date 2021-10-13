@@ -7,10 +7,12 @@ import os
 import sys
 import stat
 import time
+import calendar
 import math
 import gzip
 import bz2
 import struct
+import binascii
 import pprint
 import base64
 import hashlib
@@ -255,8 +257,12 @@ class Folder(object):
 
 class DiskWalker(object):
 	def __init__(self, top):
-		if ':' in top:
+		if ':' in top and top.endswith('rfl'):
 			self.from_rfl(top)
+			return
+		
+		if ':' in top and top.endswith('mdw'):
+			self.from_mdw(top)
 			return
 		
 		self.cur_top = top
@@ -275,11 +281,59 @@ class DiskWalker(object):
 		self.cur_top = None
 		print('\033[32mleaving\033[0m', top)
 
+	def from_mdw(self, top):
+		top, mdw = top.split(':', 1)
+		print('loading [{}] from mdw [{}]'.format(top, mdw))
+		# 100644 2019-11-05 21:02:07     11073166 c620bb4f9551a283360342f7307999fb968edd1f boot/initramfs-vanilla
+		ptn = re.compile(r'^([0-9]{6}) ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}) +([0-9]+) +([0-9a-f]{40}) (.*)$')
+		folders = {}
+		hashtab = {}
+		with bz2.open(mdw, 'rb') as f:
+			for ln in f:
+				m = ptn.match(ln.decode('utf-8', 'replace').strip())
+				if not m:
+					continue
+				
+				try:
+					modes, isots, sz, sha, relpath = m.groups()
+					fpath = os.path.abspath(os.path.join(top, relpath))
+					fdir, fname = fpath.rsplit('/', 1)
+					sz = int(sz)
+				except Exception as ex:
+					raise Exception('could not parse {}\n{}\n'.format(
+						ln, str(ex)))
+				
+				if sz <= 0:
+					continue
+				
+				ts = datetime.strptime(isots, '%Y-%m-%d %H:%M:%S')
+				ts = calendar.timegm(ts.timetuple())
+				sha = binascii.unhexlify(sha)
+				sha = base64.b64encode(sha).decode('ascii').rstrip('=')
+				try:
+					folders[fdir].append(sz)
+					hashtab[fdir][fname] = [sz, ts, sha]
+				except:
+					folders[fdir] = [sz]
+					hashtab[fdir] = {fname: [sz, ts, sha]}
+		
+		self.errors = []
+		self.folders = []
+		for fpath, fsizes in folders.items():
+			folder = Folder(fpath)
+			folder.files = fsizes
+			folder.hashes = hashtab[fpath]
+			sz = sum(fsizes)
+			
+			if sz > 1*1024*1024 \
+			and (len(fsizes) > 2 or sz >= 512*1024*1024):
+				self.folders.append(folder)
+		
 	def from_rfl(self, top):
 		top, rfl = top.split(':', 1)
 		print('loading [{}] from rfl [{}]'.format(top, rfl))
 		# ./hd/t5/revo.dd.tar.gz //  [-rwxr-xr-x/20656344319/ed:ed] @1247779616
-		ptn = re.compile('(.*) // (.*) \[([dlrwx-]{10})/([0-9]+)/([^]]+)\] @([0-9]+)$')
+		ptn = re.compile(r'^(.*) // (.*) \[([dlrwx-]{10})/([0-9]+)/([^]]+)\] @([0-9]+)$')
 		folders = {}
 		with bz2.open(rfl, 'rb') as f:
 			for ln in f:
@@ -471,6 +525,12 @@ def gen_dupe_map(roots, snap_path):
 			
 			score = (len(hits) * 2.0) / (
 				len(folder1.files) + len(folder2.files))
+			
+			if False:
+				print('\n{}\n{}\n  score {:.2f}, len[{},{}], sz[{},{}], hits {}'.format(
+					folder1.path, folder2.path, score,
+					len(folder1.files), len(folder2.files),
+					sum(folder1.files), sum(folder2.files), sum(hits)))
 			
 			# sufficiently large hits skip all the checks
 			if sum(hits) < 600 * 1024 * 1024:
@@ -1441,7 +1501,7 @@ press ENTER to quit this help view
 					
 					os.rename(p1, p2)
 			
-			if ch == 'h':
+			if ch in ['h','H']:
 				# dump the folders and let core handle the rest
 				ret = []
 				for fld, stf in [
@@ -1560,17 +1620,26 @@ class Hashd(object):
 				by_folder[fdir] = [entry]
 		
 		seen = {}
+		new_hashes = []
 		for _, fld1, fld2 in dupes:
 			for fld in [fld1, fld2]:
 				if fld in seen:
 					continue
 				
 				seen[fld] = 1
+				for fname, (sz, ts, sha1) in fld.hashes.items():
+					fpath = os.path.join(fld.path, fname)
+					shab = self.cached_hash(sz, ts, fname)
+					if not shab:
+						# local cache takes precedence over mdw contents
+						new_hashes.append([sha1, sz, ts, fpath])
 				try:
-					fname, sz, ts, sha1 = by_folder[fld.path]
-					fld.hashes[fname] = [sz, ts, sha1]
+					for fname, sz, ts, sha1 in by_folder[fld.path]:
+						fld.hashes[fname] = [sz, ts, sha1]
 				except:
 					pass
+		
+		self.add_hashes(new_hashes)
 	
 	def terminate(self):
 		for _, worker in self.workers.items():
@@ -1598,6 +1667,28 @@ class Hashd(object):
 		
 		self.workers[dev_id].put([fld, stf])
 	
+	def cached_hash(self, sz, ts, fpath):
+		"""returns hash if all attributes match"""
+		if fpath in self.hashtab:
+			csz, cts, csha = self.hashtab[fpath]
+			if sz == csz and ts == cts:
+				return csha
+		
+		return None
+	
+	def add_hashes(self, sha1_sz_ts_fpath):
+		if not sha1_sz_ts_fpath:
+			return
+		
+		with self.mtx:
+			with open(self.sha1_path, 'ba+') as f:
+				for item in sha1_sz_ts_fpath:
+					ln = ' '.join(str(x) for x in item) + '\n'
+					f.write(ln.encode('utf-8', ENC_FILTER))
+			
+			for sha1, sz, ts, fpath in sha1_sz_ts_fpath:
+				self.hashtab[fpath] = [sz, ts, sha1]
+	
 	def worker(self, q):
 		while True:
 			task = q.get()
@@ -1609,12 +1700,8 @@ class Hashd(object):
 			new_hashes = []
 			for sz, ts, fname in stf:
 				fpath = os.path.join(fld.path, fname)
-				sha = None
 				with self.mtx:
-					if fpath in self.hashtab:
-						csz, cts, csha = self.hashtab[fpath]
-						if sz == csz and ts == cts:
-							sha = csha
+					sha = self.cached_hash(sz, ts, fname)
 				
 				if not sha:
 					sha = self.hashfile(fpath)
@@ -1622,15 +1709,7 @@ class Hashd(object):
 				
 				fld.hashes[fname] = [sz, ts, sha]
 			
-			if new_hashes:
-				with self.mtx:
-					with open(self.sha1_path, 'ba+') as f:
-						for item in new_hashes:
-							ln = ' '.join(str(x) for x in item) + '\n'
-							f.write(ln.encode('utf-8', ENC_FILTER))
-					
-					for fpath, sz, ts, sha1 in new_hashes:
-						self.hashtab[fpath] = [sz, ts, sha1]
+			self.add_hashes(new_hashes)
 	
 	def hashfile(self, fpath):
 		hasher = hashlib.sha1()
@@ -1726,7 +1805,8 @@ def main():
 		if rv == 'v':
 			tui.inverted_hilight = not tui.inverted_hilight
 		
-		if rv == 'h':
+		if rv in ['h', 'H']:
+			#import pudb; pu.db
 			hashq1 = []
 			hashq2 = []
 			(fld1, stf1), (fld2, stf2) = extra
@@ -1734,14 +1814,28 @@ def main():
 				hit = next((x for x in stf2 if x[0] == sz and sz > 0), None)
 				if hit:
 					sz2, ts2, fn2 = hit
-					hashq1.append([sz, ts, fn])
-					hashq2.append(hit)
 					stf2.remove(hit)
-					fld1.hashes[fn] = [sz, ts, 'x']
-					fld2.hashes[fn2] = [sz2, ts2, 'x']
+					try:
+						fsz, fts, _ = fld1.hashes[fn]
+						if fsz != sz or fts != ts or rv == 'H':
+							raise Exception()
+					except:
+						fld1.hashes[fn] = [sz, ts, 'x']
+						hashq1.append([sz, ts, fn])
+					
+					try:
+						fsz, fts, _ = fld2.hashes[fn2]
+						if fsz != sz2 or fts != ts2 or rv == 'H':
+							raise Exception()
+					except:
+						fld2.hashes[fn2] = [sz2, ts2, 'x']
+						hashq2.append(hit)
 			
-			hashd.add(fld1, hashq1)
-			hashd.add(fld2, hashq2)
+			if hashq1:
+				hashd.add(fld1, hashq1)
+			
+			if hashq2:
+				hashd.add(fld2, hashq2)
 		
 		if rv == 'rm':
 			nuke_path, nuke_files = extra
