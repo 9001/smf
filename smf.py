@@ -734,20 +734,36 @@ def read_folder(top):
 	return ret
 
 
-def draw_panel(panel_w, stf, other_sizes, htab1, htab2):
+def draw_panel(panel_w, stf, other_sizes, htab1, htab2, inverted_hilight):
 	htab1 = dict(htab1)
 	htab2 = dict(htab2)
 	lines = []
 	files = []
 	meta_len = 21
 	fn_len = panel_w - (meta_len + 1)
+
+	initial = '0'
+	white = '1;30;47'
+	yellow = '1;30;43'
+	blue = '1;30;44'
+	green = '1;37;44;48;5;28'
+	red = '1;37;41'
+
+	if inverted_hilight:
+		initial = '1;30;47'
+		white = '1;37'
+		yellow = '1;33'
+		blue = '1;34'
+		green = '1;32'
+		# red = '1;31'
+
 	for sz, ts, fn in stf:
 		meta = ' ' * meta_len
 		if sz >= 0:
-			c = '0'
+			c = initial
 			if sz in other_sizes:
 				other_sizes.remove(sz)
-				c = '1;30;47'  # no-hash = white
+				c = white  # no-hash = white
 				bin_eq = True
 
 				# TODO fix structures in rewrite
@@ -762,16 +778,16 @@ def draw_panel(panel_w, stf, other_sizes, htab1, htab2):
 					_, _, hsha2 = htab2[fn2]
 					
 					if hsz != sz or hts != ts:
-						c = '1;30;43'  # dirty hash = yellow
+						c = yellow  # dirty hash
 						bin_eq = False
 					elif 'x' in [hsha, hsha2]:
-						c = '1;30;44'  # queued = blue
+						c = blue  # queued
 						bin_eq = False
 					elif hsha == hsha2:
-						c = '1;37;44;48;5;28'  # match = green
+						c = green  # match
 						bin_eq = True
 					else:
-						c = '1;37;41'  # incorrect = red
+						c = red  # incorrect
 						bin_eq = False
 					
 					del htab1[fn]
@@ -1397,8 +1413,8 @@ press ENTER to quit this help view
 			
 			stf1, sizes1 = asdf(fld1)
 			stf2, sizes2 = asdf(fld2)
-			pan1, dupefiles1 = draw_panel(panel_w, stf1, sizes2, fld1.hashes, fld2.hashes)
-			pan2, dupefiles2 = draw_panel(panel_w, stf2, sizes1, fld2.hashes, fld1.hashes)
+			pan1, dupefiles1 = draw_panel(panel_w, stf1, sizes2, fld1.hashes, fld2.hashes, self.inverted_hilight)
+			pan2, dupefiles2 = draw_panel(panel_w, stf2, sizes1, fld2.hashes, fld1.hashes, self.inverted_hilight)
 			file_rows = []
 			
 			# this is probably where the view branches will merge
@@ -1460,7 +1476,11 @@ press ENTER to quit this help view
 			if ch == '\003':
 				return 'x', None
 			
-			if ch in ['r', 'u', 'v', 'q']:
+			if ch == 'v':
+				self.inverted_hilight = not self.inverted_hilight
+				continue
+
+			if ch in ['r', 'u', 'q']:
 				return ch, None
 
 			if ch == 'k':
