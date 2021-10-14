@@ -18,11 +18,9 @@ import base64
 import hashlib
 import tempfile
 import platform
-import builtins
 import threading
 import subprocess as sp
 from datetime import datetime
-from queue import Queue
 
 
 """smf.py: file undupe by sizematching files in folders"""
@@ -45,12 +43,22 @@ ANYWIN = WINDOWS or sys.platform in ["msys"]
 VT100 = not WINDOWS or WINDOWS >= [10, 0, 14393]
 # introduced in anniversary update
 
+PY2 = sys.version_info[0] == 2
+PYPY = platform.python_implementation() == 'PyPy'
 FS_ENCODING = sys.getfilesystemencoding()
 
-ENC_FILTER = 'surrogateescape'
-if sys.version_info[0] == 2:
-	# drop mojibake support for py2 (bytestrings everywhere is a pain)
-	ENC_FILTER = 'replace'
+# drop mojibake support for py2 (bytestrings everywhere is a pain)
+ENC_FILTER = 'replace' if PY2 else 'surrogateescape'
+
+
+if PY2:
+	import __builtin__ as builtins
+	from Queue import Queue
+
+	input = raw_input
+else:
+	import builtins
+	from queue import Queue
 
 
 if not WINDOWS:
@@ -105,9 +113,8 @@ if not WINDOWS:
 
 else:
 	TERM_ENCODING = 'cp65001'
-	PYPY = platform.python_implementation() == 'PyPy'
 
-	if sys.version_info[0] == 2:
+	if PY2:
 		TERM_ENCODING = 'cp1252'  # cp932 if weeb
 		FS_ENCODING = 'mbcs'  # close enough?
 	elif PYPY:
@@ -242,8 +249,11 @@ def print(*args, **kwargs):
 		builtins.print(termsafe(' '.join(str(x) for x in args)), **kwargs)
 
 
-def statdir(logger, top, lstat):
+def _statdir_bytes(logger, top, lstat):
 	"""non-recursive listing of directory contents, along with stat() info"""
+	if lstat and ANYWIN:
+		lstat = False
+
 	scandir = hasattr(os, "scandir")
 	if lstat and not os.supports_follow_symlinks:
 		scandir = False
@@ -253,6 +263,8 @@ def statdir(logger, top, lstat):
 			for fh in dh:
 				try:
 					yield [os.path.join(top, fh.name), fh.stat(follow_symlinks=not lstat)]
+				except KeyboardInterrupt:
+					raise
 				except:
 					logger('\033[1;31maccess denied:\033[0m', fsdec(fh.path))
 	else:
@@ -261,8 +273,26 @@ def statdir(logger, top, lstat):
 			abspath = os.path.join(top, name)
 			try:
 				yield [abspath, fun(abspath)]
+			except KeyboardInterrupt:
+				raise
 			except:
 				logger('\033[1;31maccess denied:\033[0m', fsdec(abspath))
+
+
+def _statdir_as_unicode(logger, top, lstat):
+	# for pypy2 on windows (pypy3 is currently too funky)
+	top = fsdec(top)
+	for name in os.listdir(top):
+		abspath = os.path.join(top, name)
+		try:
+			yield [fsenc(abspath), os.stat(abspath)]
+		except KeyboardInterrupt:
+			raise
+		except:
+			logger('\033[1;31maccess denied:\033[0m', fsdec(abspath))
+
+
+statdir = _statdir_as_unicode if PY2 and ANYWIN and PYPY else _statdir_bytes
 
 
 class Folder(object):
@@ -959,6 +989,8 @@ class TUI(object):
 								# ok something actually went wrong
 								# (folder was probably deleted)
 								errors.append(pathnode)
+								# print("path: {}, dirs: {}".format(fsnode.path, fsnode.dirs))
+								# raise
 					
 					fsnode.scur = max(fsnode.scur, score)
 					fsnode.dupesize = max(fsnode.dupesize,
@@ -1729,7 +1761,7 @@ class Hashd(object):
 			return
 		
 		with self.mtx:
-			with open(self.sha1_path, 'ba+') as f:
+			with open(self.sha1_path, 'ab+') as f:
 				for item in sha1_sz_ts_fpath:
 					ln = ' '.join(str(x) for x in item) + '\n'
 					f.write(ln.encode('utf-8', ENC_FILTER))
@@ -1773,6 +1805,27 @@ class Hashd(object):
 		return b64.decode('ascii').rstrip('=')
 
 
+def absreal(path):
+	ret = os.path.abspath(os.path.realpath(path))
+
+	if not ANYWIN or not PY2:
+		return ret
+
+	# normalize case
+	parts = ret.split(os.sep)
+	fixed = parts[0].upper() + os.sep
+	for part in parts[1:]:
+		for cnd in os.listdir(fixed):
+			if part.lower() == cnd.lower():
+				fixed += cnd + os.sep
+				break
+	
+	if ret.lower().rstrip(os.sep) == fixed.lower().rstrip(os.sep):
+		return fixed
+
+	raise Exception("could not resolve source location;\nsrc {}\ngot {}".format(ret, fixed))
+
+
 def main():
 	if len(sys.argv) < 2:
 		print('give me folders to scan as arguments,')
@@ -1793,10 +1846,10 @@ def main():
 				try: os.remove(f)
 				except: pass
 		else:
-			roots.append(os.path.abspath(os.path.realpath(root)))
-	
+			roots.append(absreal(root))
+
 	view = 1
-	tui = TUI(os.path.abspath(os.path.realpath(os.getcwd())))
+	tui = TUI(absreal(os.getcwd()))
 	
 	dupes = []
 	hashd = None
