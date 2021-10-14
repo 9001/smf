@@ -37,6 +37,14 @@ __copyright__ = 2019
 # (these will become proper options/arguments eventually)
 
 
+WINDOWS = False
+if platform.system() == "Windows":
+    WINDOWS = [int(x) for x in platform.version().split(".")]
+
+ANYWIN = WINDOWS or sys.platform in ["msys"]
+VT100 = not WINDOWS or WINDOWS >= [10, 0, 14393]
+# introduced in anniversary update
+
 FS_ENCODING = sys.getfilesystemencoding()
 
 ENC_FILTER = 'surrogateescape'
@@ -45,9 +53,7 @@ if sys.version_info[0] == 2:
 	ENC_FILTER = 'replace'
 
 
-if sys.platform.startswith('linux') \
-or sys.platform in ['darwin', 'cygwin']:
-	VT100 = True
+if not WINDOWS:
 	TERM_ENCODING = sys.stdout.encoding
 
 	import tty, termios
@@ -97,8 +103,7 @@ or sys.platform in ['darwin', 'cygwin']:
 		return int(cr[1]), int(cr[0])
 
 
-elif sys.platform == 'win32':
-	VT100 = False
+else:
 	TERM_ENCODING = 'cp65001'
 	PYPY = platform.python_implementation() == 'PyPy'
 
@@ -182,13 +187,13 @@ elif sys.platform == 'win32':
 
 		exit()
 
-	_ = os.system('cls')  # somehow enables the vt100 interpreter??
+	_ = os.system('rem')  # somehow enables the vt100 interpreter??
 	
 	print('fsys:', FS_ENCODING)
 	print('term:', TERM_ENCODING)
 
 	def wprint(txt):
-		_ = os.system('cls')  # ensure vt100 is still good
+		_ = os.system('rem')  # ensure vt100 is still good
 		#txt = re_other_ansi.sub('', txt)
 		
 		h = windll.kernel32.GetStdHandle(-11)
@@ -209,9 +214,6 @@ elif sys.platform == 'win32':
 		#sys.stdout.flush()
 		c = txt[ptr:].encode(TERM_ENCODING, 'replace')
 		windll.kernel32.WriteConsoleA(h, c_char_p(c), len(c), None, None)
-
-else:
-	raise Exception('unsupported platform: {}'.format(sys.platform))
 
 
 ########################################################################
@@ -238,6 +240,29 @@ def print(*args, **kwargs):
 		builtins.print(*list(args), **kwargs)
 	except:
 		builtins.print(termsafe(' '.join(str(x) for x in args)), **kwargs)
+
+
+def statdir(logger, top, lstat):
+	"""non-recursive listing of directory contents, along with stat() info"""
+	scandir = hasattr(os, "scandir")
+	if lstat and not os.supports_follow_symlinks:
+		scandir = False
+
+	if scandir:
+		with os.scandir(top) as dh:
+			for fh in dh:
+				try:
+					yield [os.path.join(top, fh.name), fh.stat(follow_symlinks=not lstat)]
+				except:
+					logger('\033[1;31maccess denied:\033[0m', fsdec(fh.path))
+	else:
+		fun = os.lstat if lstat else os.stat
+		for name in os.listdir(top):
+			abspath = os.path.join(top, name)
+			try:
+				yield [abspath, fun(abspath)]
+			except:
+				logger('\033[1;31maccess denied:\033[0m', fsdec(abspath))
 
 
 class Folder(object):
@@ -296,8 +321,11 @@ class DiskWalker(object):
 				
 				try:
 					modes, isots, sz, sha, relpath = m.groups()
+					if ANYWIN:
+						relpath = relpath.replace('/', os.sep)
+					
 					fpath = os.path.abspath(os.path.join(top, relpath))
-					fdir, fname = fpath.rsplit('/', 1)
+					fdir, fname = fpath.rsplit(os.sep, 1)
 					sz = int(sz)
 				except Exception as ex:
 					raise Exception('could not parse {}\n{}\n'.format(
@@ -343,8 +371,11 @@ class DiskWalker(object):
 				
 				try:
 					fn, lnk, modes, sz, owner, ts = m.groups()
+					if ANYWIN:
+						fn = fn.replace('/', os.sep)
+					
 					fn = os.path.abspath(os.path.join(top, fn))
-					fdir, fn = fn.rsplit('/', 1)
+					fdir, fn = fn.rsplit(os.sep, 1)
 					sz = int(sz)
 				except Exception as ex:
 					raise Exception('could not parse {}\n{}\n'.format(
@@ -395,17 +426,9 @@ class DiskWalker(object):
 		dev_id = self.dev_id
 		folder = Folder(top)
 		btop = fsenc(top)
-		for bfn in sorted(os.listdir(btop)):
+		for bfn, sr in statdir(self.oof, btop, True):
 			bpath = os.path.join(btop, bfn)
 			if b'\n' in bpath:
-				continue
-			
-			try:
-				sr = os.lstat(bpath)
-			except KeyboardInterrupt:
-				raise
-			except:
-				self.oof('\033[1;31maccess denied:\033[0m', fsdec(bpath))
 				continue
 			
 			mode = sr.st_mode
@@ -413,7 +436,7 @@ class DiskWalker(object):
 			if stat.S_ISLNK(mode):
 				continue
 			
-			elif sr.st_dev != dev_id:
+			elif sr.st_dev != dev_id and not ANYWIN:
 				self.oof('\033[35mskipping mountpoint:\033[0m', fsdec(bpath))
 			
 			elif stat.S_ISDIR(mode):
@@ -663,11 +686,9 @@ def read_folder(top):
 	ret = []
 	btop = fsenc(top)
 	#top = fsenc(unitop)
-	for bfn in sorted(os.listdir(btop)):
-		bpath = os.path.join(btop, bfn)
-		sr = os.lstat(bpath)
+	for bfn, sr in statdir(print, btop, True):
 		mode = sr.st_mode
-		fn = fsdec(bfn)
+		fn = fsdec(os.path.basename(bfn))
 		
 		if stat.S_ISREG(mode):
 			ret.append([sr.st_size, int(sr.st_mtime), fn])
@@ -777,18 +798,21 @@ class FSDir(object):
 		
 		if self.files or self.dirs:
 			if extra_levels > 0:
-				dn = dest[len(self.path):].split('/', 1)[0]
+				dn = dest[len(self.path):].split(os.sep, 1)[0]
 				self.dirs[dn].build_until(dest, extra_levels)
 			
 			return
-		
+
+		if not self.path:
+			# windows
+			n = dest.split(os.sep)[0]
+			self.dirs[n] = FSDir(n + os.sep)
+			return
+
 		bself = fsenc(self.path)
-		for bfn in sorted(os.listdir(bself)):
-			fn = fsdec(bfn)
-			bpath = os.path.join(bself, bfn)
+		for bfn, sr in statdir(print, bself, True):
+			fn = fsdec(os.path.basename(bfn))
 			path = os.path.join(self.path, fn)
-			
-			sr = os.lstat(bpath)
 			mode = sr.st_mode
 
 			if stat.S_ISREG(mode):
@@ -796,7 +820,7 @@ class FSDir(object):
 			elif stat.S_ISLNK(mode):
 				self.files.append([-2, -2, fn])
 			elif stat.S_ISDIR(mode):
-				path += '/'
+				path += os.sep
 				subdir = FSDir(path)
 				self.dirs[fn] = subdir
 
@@ -915,23 +939,23 @@ class TUI(object):
 		if not self.fs:
 			print('\033[36mbuilding directory tree...\033[0m')
 			errors = []
-			self.fs = FSDir('/')
+			self.fs = FSDir("" if ANYWIN else "/")
 			for score, fld1, fld2 in self.dupes:
 				for path in [fld1.path, fld2.path]:
-					pathnodes = path.lstrip('/').split('/')
+					pathnodes = path.lstrip(os.sep).split(os.sep)
 					fsnode = self.fs
 					for pathnode in pathnodes:
 						try:
 							fsnode = fsnode.dirs[pathnode]
 							if not fsnode.dirs and not fsnode.files:
-								self.fs.build_until(path + '/')
+								self.fs.build_until(path + os.sep)
 						except:
 							# this one is fine,
 							# just means we haven't visited it yet
 							try:
-								self.fs.build_until(path + '/')
+								self.fs.build_until(path + os.sep)
 								fsnode = fsnode.dirs[pathnode]
-							except:
+							except Exception as ex:
 								# ok something actually went wrong
 								# (folder was probably deleted)
 								errors.append(pathnode)
@@ -1028,7 +1052,7 @@ class TUI(object):
 		scr_y = 0
 		dir_ptr = 0
 		for n, (path, _, _) in enumerate(tree):
-			if path == self.cur_path + '/':
+			if path == self.cur_path + os.sep:
 				scr_w, scr_h = termsize()
 				scr_y = int(max(0, n - scr_h / 2.5))
 				dir_ptr = n
@@ -1114,7 +1138,7 @@ class TUI(object):
 			scrn += '\n'.join(rows)
 			scrn = scrn.replace('\n', '\033[K\n') + '\033[J'
 			
-			if VT100:
+			if not WINDOWS:
 				print(scrn, end='')
 			else:
 				wprint(scrn)
@@ -1237,7 +1261,7 @@ press ENTER to quit this help view
 				# and that host-terminal is running fullscreen but urxvt won't be
 				geom = '{}x{}'.format(scr_w, scr_h - 1).encode('ascii')
 				
-				if VT100:
+				if not ANYWIN:
 					try:
 						sp.Popen([
 							b'urxvt', b'-title', b'ranger', b'+sb', b'-bl', b'-geometry', geom, b'-e',
@@ -1393,7 +1417,7 @@ press ENTER to quit this help view
 			scrn += '\n'.join(file_rows)
 			scrn = scrn.replace('\n', '\033[K\n') + '\033[J'
 			
-			if VT100:
+			if not WINDOWS:
 				print(scrn, end='')
 			else:
 				wprint(scrn)
@@ -1636,7 +1660,7 @@ class Hashd(object):
 		
 		by_folder = {}
 		for fpath, (sz, ts, sha1) in self.hashtab.items():
-			fdir, fname = fpath.rsplit('/', 1)
+			fdir, fname = fpath.rsplit(os.sep, 1)
 			entry = [fname, sz, ts, sha1]
 			try:
 				by_folder[fdir].append(entry)
