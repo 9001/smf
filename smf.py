@@ -559,6 +559,7 @@ def gen_dupe_map(roots, snap_path):
 		
 		mnt = folder1.path[:8]  # pylint: disable=unused-variable
 		
+		sf1 = set(folder1.files)
 		for folder2 in folders[nth:]:
 
 			# option: uncomment to only compare between different drives
@@ -567,15 +568,24 @@ def gen_dupe_map(roots, snap_path):
 			
 			
 			# hits = each file size that matched,
-			# rhs = the remaining files in folder2 to check
-			# (to deal w/ multiple files of same size in one folder)
-			hits = []
-			rhs = folder2.files[:]
-			for sz in folder1.files:
-				if sz in rhs:
-					hits.append(sz)
-					rhs.remove(sz)
+			# there's duplicate values so plain intersect is ng
+			#
+			# was 180.8 sec
+			# now  29.7 sec
 			
+			isect = sf1.intersection(folder2.files)
+			if not isect:
+				continue
+			
+			hits = []
+			l1 = folder1.files[:]
+			l2 = folder2.files[:]
+			for sz in isect:
+				while sz in l1 and sz in l2:
+					hits.append(sz)
+					l1.remove(sz)
+					l2.remove(sz)
+
 			score = (len(hits) * 2.0) / (
 				len(folder1.files) + len(folder2.files))
 			

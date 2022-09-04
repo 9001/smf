@@ -12,7 +12,7 @@ it sounds too naive to work but it actually does, really well even, so don't kno
 
 ## usage
 
-run the script, preferably with pypy which reduces the initial scan from 40sec to 2.6sec (seriously), then
+run the script, preferably with pypy which does the initial scan 2.3x faster, then
 * use A/D to navigate through the folders it thinks are dupes
 * use W/S to scroll up/down in large folders
 * press Q to toggle tree-view
