@@ -103,10 +103,10 @@ if not WINDOWS:
 		
 		if not cr:
 			try:
-				cr = [env['LINES'], env['COLUMNS']]
+				cr = (env['LINES'], env['COLUMNS'])
 			except:
 				print('env failed')
-				cr = [25, 80]
+				cr = (25, 80)
 		
 		return int(cr[1]), int(cr[0])
 
@@ -262,7 +262,7 @@ def _statdir_bytes(logger, top, lstat):
 		with os.scandir(top) as dh:
 			for fh in dh:
 				try:
-					yield [os.path.join(top, fh.name), fh.stat(follow_symlinks=not lstat)]
+					yield (os.path.join(top, fh.name), fh.stat(follow_symlinks=not lstat))
 				except KeyboardInterrupt:
 					raise
 				except:
@@ -272,7 +272,7 @@ def _statdir_bytes(logger, top, lstat):
 		for name in os.listdir(top):
 			abspath = os.path.join(top, name)
 			try:
-				yield [abspath, fun(abspath)]
+				yield (abspath, fun(abspath))
 			except KeyboardInterrupt:
 				raise
 			except:
@@ -285,7 +285,7 @@ def _statdir_as_unicode(logger, top, lstat):
 	for name in os.listdir(top):
 		abspath = os.path.join(top, name)
 		try:
-			yield [fsenc(abspath), os.stat(abspath)]
+			yield (fsenc(abspath), os.stat(abspath))
 		except KeyboardInterrupt:
 			raise
 		except:
@@ -370,10 +370,10 @@ class DiskWalker(object):
 				sha = base64.b64encode(sha).decode('ascii').rstrip('=')
 				try:
 					folders[fdir].append(sz)
-					hashtab[fdir][fname] = [sz, ts, sha]
+					hashtab[fdir][fname] = (sz, ts, sha)
 				except:
 					folders[fdir] = [sz]
-					hashtab[fdir] = {fname: [sz, ts, sha]}
+					hashtab[fdir] = {fname: (sz, ts, sha)}
 		
 		self.errors = []
 		self.folders = []
@@ -603,7 +603,7 @@ def gen_dupe_map(roots, snap_path):
 				and sum(hits) < b * 0.2:
 					continue
 			
-			dupes.append([score, folder1, folder2])
+			dupes.append((score, folder1, folder2))
 
 	t2 = time.time()
 	
@@ -615,7 +615,7 @@ def gen_dupe_map(roots, snap_path):
 		print('\nare these {} errors ok? press ENTER to continue or CTRL-C'.format(len(errors)))
 		input()
 	
-	return dupes, [t1-t0, t2-t1]
+	return dupes, (t1-t0, t2-t1)
 
 
 def save_dupe_map(cache_path, dupes):
@@ -625,7 +625,7 @@ def save_dupe_map(cache_path, dupes):
 		
 		# serialize folders that contain dupes
 		for _, fld1, fld2 in dupes:
-			for fld in [fld1, fld2]:
+			for fld in (fld1, fld2):
 				if fld not in seen_folders:
 					txt = 'p {}\nf {}\n'.format(fld.path,
 						' '.join(str(x) for x in fld.files))
@@ -664,7 +664,7 @@ def load_dupe_map(cache_path):
 			
 			if ln.startswith('d '):
 				score, i1, i2 = [int(x) for x in ln[2:].split(' ')]
-				dupes.append([score/1000., folders[i1], folders[i2]])
+				dupes.append((score/1000., folders[i1], folders[i2]))
 				continue
 			
 			if ln == 'eof':
@@ -721,7 +721,7 @@ def read_folder(top):
 		fn = fsdec(os.path.basename(bfn))
 		
 		if stat.S_ISREG(mode):
-			ret.append([sr.st_size, int(sr.st_mtime), fn])
+			ret.append((sr.st_size, int(sr.st_mtime), fn))
 		else:
 			n = -3
 			if stat.S_ISLNK(mode):
@@ -729,7 +729,7 @@ def read_folder(top):
 			elif stat.S_ISDIR(mode):
 				n = -1
 			
-			ret.append([n, n, fn])
+			ret.append((n, n, fn))
 	
 	return ret
 
@@ -793,7 +793,7 @@ def draw_panel(panel_w, stf, other_sizes, htab1, htab2, inverted_hilight):
 					del htab1[fn]
 					del htab2[fn2]
 
-				files.append([bin_eq, fn])
+				files.append((bin_eq, fn))
 			
 			sz = str(sz).rjust(11)
 			sz = '{}\033[36m{}\033[0m{}'.format(
@@ -862,9 +862,9 @@ class FSDir(object):
 			mode = sr.st_mode
 
 			if stat.S_ISREG(mode):
-				self.files.append([sr.st_size, int(sr.st_mtime), fn])
+				self.files.append((sr.st_size, int(sr.st_mtime), fn))
 			elif stat.S_ISLNK(mode):
-				self.files.append([-2, -2, fn])
+				self.files.append((-2, -2, fn))
 			elif stat.S_ISDIR(mode):
 				path += os.sep
 				subdir = FSDir(path)
@@ -1360,7 +1360,7 @@ press ENTER to quit this help view
 			sep = '{}'.format(os.path.sep)
 			max_parent = 0
 			max_leaf = 0
-			paths = [fld1.path, fld2.path]
+			paths = (fld1.path, fld2.path)
 			for path in paths:
 				try:
 					a, b = path.rsplit(sep, 1)
@@ -1406,7 +1406,7 @@ press ENTER to quit this help view
 				try:
 					stf = read_folder(fld.path)
 				except:
-					stf = [[-3, -3, 'folder 404 (press U to rescan)']]
+					stf = [(-3, -3, 'folder 404 (press U to rescan)')]
 				
 				sizes = [x[0] for x in stf]
 				return stf, sizes
@@ -1509,7 +1509,7 @@ press ENTER to quit this help view
 				print('\n')
 				
 				if ch == 'k':
-					return 'rm', [nuke_path, nuke_files]
+					return 'rm', (nuke_path, nuke_files)
 				elif ch == 'l':
 					# main needs *_files ordered, another todo for the rewrite
 					# fld.hashes[fname] = [sz, ts, sha1]
@@ -1523,12 +1523,12 @@ press ENTER to quit this help view
 						
 						for fn2, (sz, ts, sha1) in keep_fld.hashes.items():
 							if sha1 == expect:
-								lhs.append([True, fn])
-								rhs.append([True, fn2])
+								lhs.append((True, fn))
+								rhs.append((True, fn2))
 								break
 					
 					#return 'ln', [keep_path, keep_files, nuke_path, nuke_files]
-					return 'ln', [keep_path, rhs, nuke_path, lhs]
+					return 'ln', (keep_path, rhs, nuke_path, lhs)
 				
 				print('\n\n\033[1;37;44m abort \033[0m')
 				time.sleep(0.5)
@@ -1587,7 +1587,7 @@ press ENTER to quit this help view
 					
 					srcpath = os.path.join(dstdir, dstfn)
 					dstpath = os.path.join(dstdir, srcfn)
-					actions.append([srcpath, dstpath])
+					actions.append((srcpath, dstpath))
 					
 					print('old {}\nnew {}\n'.format(*actions[-1]))
 				
@@ -1610,9 +1610,9 @@ press ENTER to quit this help view
 				]:
 					fret = []
 					for sz, ts, fn in stf:
-						fret.append([sz, ts, fn])
+						fret.append((sz, ts, fn))
 					
-					ret.append([fld, fret])
+					ret.append((fld, fret))
 				
 				return ch, ret
 
@@ -1708,12 +1708,12 @@ class Hashd(object):
 			with open(sha1_path, 'rb') as f:
 				for ln in f:
 					sha1, sz, ts, fn = ln.decode('utf-8').split(' ', 3)
-					self.hashtab[fn.rstrip()] = [int(sz), int(ts), sha1]
+					self.hashtab[fn.rstrip()] = (int(sz), int(ts), sha1)
 		
 		by_folder = {}
 		for fpath, (sz, ts, sha1) in self.hashtab.items():
 			fdir, fname = fpath.rsplit(os.sep, 1)
-			entry = [fname, sz, ts, sha1]
+			entry = (fname, sz, ts, sha1)
 			try:
 				by_folder[fdir].append(entry)
 			except:
@@ -1732,10 +1732,10 @@ class Hashd(object):
 					shab = self.cached_hash(sz, ts, fname)
 					if not shab:
 						# local cache takes precedence over mdw contents
-						new_hashes.append([sha1, sz, ts, fpath])
+						new_hashes.append((sha1, sz, ts, fpath))
 				try:
 					for fname, sz, ts, sha1 in by_folder[fld.path]:
-						fld.hashes[fname] = [sz, ts, sha1]
+						fld.hashes[fname] = (sz, ts, sha1)
 				except:
 					pass
 		
@@ -1765,7 +1765,7 @@ class Hashd(object):
 			thr.daemon = True
 			thr.start()
 		
-		self.workers[dev_id].put([fld, stf])
+		self.workers[dev_id].put((fld, stf))
 	
 	def cached_hash(self, sz, ts, fpath):
 		"""returns hash if all attributes match"""
@@ -1787,7 +1787,7 @@ class Hashd(object):
 					f.write(ln.encode('utf-8', ENC_FILTER))
 			
 			for sha1, sz, ts, fpath in sha1_sz_ts_fpath:
-				self.hashtab[fpath] = [sz, ts, sha1]
+				self.hashtab[fpath] = (sz, ts, sha1)
 	
 	def worker(self, q):
 		while True:
@@ -1805,9 +1805,9 @@ class Hashd(object):
 				
 				if not sha:
 					sha = self.hashfile(fpath)
-					new_hashes.append([sha, sz, ts, fpath])
+					new_hashes.append((sha, sz, ts, fpath))
 				
-				fld.hashes[fname] = [sz, ts, sha]
+				fld.hashes[fname] = (sz, ts, sha)
 			
 			self.add_hashes(new_hashes)
 	
@@ -1941,15 +1941,15 @@ def main():
 						if fsz != sz or fts != ts or rv == 'H':
 							raise Exception()
 					except:
-						fld1.hashes[fn] = [sz, ts, 'x']
-						hashq1.append([sz, ts, fn])
+						fld1.hashes[fn] = (sz, ts, 'x')
+						hashq1.append((sz, ts, fn))
 					
 					try:
 						fsz, fts, _ = fld2.hashes[fn2]
 						if fsz != sz2 or fts != ts2 or rv == 'H':
 							raise Exception()
 					except:
-						fld2.hashes[fn2] = [sz2, ts2, 'x']
+						fld2.hashes[fn2] = (sz2, ts2, 'x')
 						hashq2.append(hit)
 			
 			if hashq1:
@@ -1999,7 +1999,7 @@ def main():
 				
 				keep_abs = os.path.join(keep_path, keep_fn)
 				nuke_abs = os.path.join(nuke_path, nuke_fn)
-				actions.append([keep_abs, nuke_abs])
+				actions.append((keep_abs, nuke_abs))
 				print('ln \033[1;37;44m{}\033[0;1;33m -> \033[1;37;41m{}\033[0m'.format(*actions[-1]))
 			
 			print('press ENTER to confirm')
